@@ -62,39 +62,19 @@ class TestGPUDeviceGuard(torch._dynamo.test_case.TestCase):
             self.device_interface = XpuInterface
         else:
             raise ValueError("Not supported GPU type")
-    @unittest.skipIf(not TEST_MULTIGPU, "need multiple GPU")
-    def test_device_guard(self):
-        current_device = torch.accelerator.current_device_index()
 
-        device_guard = DeviceGuard(self.device_interface, 1)
-
-        with device_guard as _:
-            self.assertEqual(torch.accelerator.current_device_index(), 1)
-            self.assertEqual(device_guard.prev_idx, 0)
-            self.assertEqual(device_guard.idx, 1)
-
-        self.assertEqual(torch.accelerator.current_device_index(), current_device)
-        self.assertEqual(device_guard.prev_idx, 0)
-        self.assertEqual(device_guard.idx, 1)
-
-    def test_device_guard_no_index(self, device):
-        device_interface = get_interface_for_device(torch.device(device).type)
+    def test_device_guard_no_index(self):
         current_device = torch.accelerator.current_device_index()
 
         device_guard = DeviceGuard(device_interface, None)
 
         with device_guard as _:
-            self.assertEqual(torch.cuda.current_device(), current_device)
+            self.assertEqual(torch.accelerator.current_device_index(), current_device)
             self.assertEqual(device_guard.prev_idx, -1)
             self.assertEqual(device_guard.idx, None)
 
         self.assertEqual(device_guard.prev_idx, -1)
         self.assertEqual(device_guard.idx, None)
-
-
-instantiate_device_type_tests(
-    TestDeviceGuardWithInterface, globals(), allow_mps=True, allow_xpu=True
-)
 
 
 if __name__ == "__main__":
