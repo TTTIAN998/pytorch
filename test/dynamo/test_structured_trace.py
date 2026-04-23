@@ -364,7 +364,7 @@ class StructuredTraceTest(TestCase):
 {{"dynamo_cpp_guards_str": {{}}, "frame_id": 0, "frame_compile_id": 0, "attempt": 0, "has_payload": "HASH"}}
 {{"compilation_metrics": "METRICS", "frame_id": 0, "frame_compile_id": 0, "attempt": 0}}
 {{"compilation_metrics_runtime": "METRICS", "frame_id": 0, "frame_compile_id": 0}}
-""",  # noqa: B950
+""",
         )
 
         self.assertParses()
@@ -398,7 +398,7 @@ class StructuredTraceTest(TestCase):
 {{"dynamo_cpp_guards_str": {{}}, "frame_id": 0, "frame_compile_id": 0, "attempt": 0, "has_payload": "HASH"}}
 {{"compilation_metrics": "METRICS", "frame_id": 0, "frame_compile_id": 0, "attempt": 0}}
 {{"compilation_metrics_runtime": "METRICS", "frame_id": 0, "frame_compile_id": 0}}
-""",  # noqa: B950
+""",
         )
 
         self.assertParses()
