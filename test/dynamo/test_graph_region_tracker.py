@@ -8,6 +8,8 @@ from torch._dynamo.testing import extract_graph_and_tracker
 from torch.testing._internal.common_utils import recover_orig_fp32_precision
 from torch.utils._pytree import tree_map
 
+device_type = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
+
 
 class GraphRegionTrackerTests(TestCase):
     def setUp(self):
