@@ -1320,7 +1320,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         result = torch.ops.test.local_var_triton_op(a)
         self.assertEqual(result, expected)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -1380,7 +1380,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
 
         self.assertEqual(fn(a2), result)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -1442,7 +1442,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         result = torch.ops.test.recursive_func_triton_op(a)
         self.assertEqual(result, expected)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -1498,7 +1498,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         result = torch.ops.test.factory_triton_op(a)
         self.assertEqual(result, expected)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -1566,7 +1566,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         result = torch.ops.test.lru_cache_triton_op(a)
         self.assertEqual(result, expected)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
