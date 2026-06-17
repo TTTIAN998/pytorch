@@ -5,8 +5,6 @@ import math
 import os
 from unittest.mock import patch
 
-from torch._internal.inductor_utils import GPU_TYPE
-
 import torch
 import torch._dynamo
 import torch._dynamo.config
@@ -18,6 +16,7 @@ from torch._dynamo.debug_utils import (
     NNModuleToString,
 )
 from torch._dynamo.test_case import TestCase
+from torch._internal.inductor_utils import GPU_TYPE
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 
