@@ -59,6 +59,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     IS_LINUX,
     parametrize,
+    skipIfXpu,
     skipIfWindows,
     subtest,
     TEST_CUDA,
@@ -4012,6 +4013,7 @@ class AOTAutogradCachePicklerTests(torch._dynamo.test_case.TestCase):
         ):
             AOTAutogradCache._pickle_entry(entry, remote=False)
 
+    @skipIfXpu(msg="https://github.com/intel/torch-xpu-ops/issues/4091")
     @requires_gpu_and_triton
     def test_prepare_for_pickle_clears_benchmark_failure_reasons(self):
         """prepare_for_pickle clears benchmark_failure_reasons which can hold
