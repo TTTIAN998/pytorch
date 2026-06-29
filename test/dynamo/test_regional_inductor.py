@@ -937,7 +937,7 @@ def forward(self, tangents_0):
         # self.assertEqual(len(codes), 2)
         self.assertEqual(result, fn(c))
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     def test_unbacked_expr_size_input(self):
         def fn(c):
             d = torch.concat([c, c], dim=0)
@@ -945,7 +945,7 @@ def forward(self, tangents_0):
                 d = d + 1
             return d
 
-        c = torch.randn((64, 32), device="cuda", requires_grad=True)
+        c = torch.randn((64, 32), device=device_type, requires_grad=True)
         torch._dynamo.decorators.mark_unbacked(c, 0)
 
         opt_fn = torch.compile(
