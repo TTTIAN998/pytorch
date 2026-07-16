@@ -1,15 +1,10 @@
 # Owner(s): ["module: dynamo"]
-import unittest
-
 import torch
 import torch._dynamo.test_case
 from torch._dynamo.testing import CompileCounter, EagerAndRecordGraphs, normalize_gm
-from torch.testing._internal.common_cuda import TEST_CUDA
-from torch.testing._internal.common_utils import TEST_XPU
-
-
-device_type = (
-    acc.type if (acc := torch.accelerator.current_accelerator(True)) else "cpu"
+from torch.testing._internal.common_device_type import (
+    instantiate_device_type_tests,
+    onlyAccelerator,
 )
 
 
@@ -80,8 +75,8 @@ class GraphModule(torch.nn.Module):
 """,
         )
 
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "requires cuda or xpu")
-    def test_dispatch_key_set_guard(self):
+    @onlyAccelerator
+    def test_dispatch_key_set_guard(self, device):
         counter = CompileCounter()
 
         @torch.compile(backend=counter, fullgraph=True)
@@ -102,7 +97,7 @@ class GraphModule(torch.nn.Module):
         # No recompile since the dispatch key set is the same though the tensor is different.
         self.assertEqual(counter.frame_count, 1)
 
-        x3 = torch.randn(2, 3, device=device_type)
+        x3 = torch.randn(2, 3, device=device)
         dks3 = torch._C._dispatch_keys(x3)
         self.assertEqual(fn(x3, dks3), torch.sin(x3 - 1))
         # Re-compile since the dispatch key set is different.
@@ -164,6 +159,9 @@ class GraphModule(torch.nn.Module):
             torch._C._dispatch_tls_set_dispatch_key_included(
                 torch._C.DispatchKey.PythonTLSSnapshot, saved_python_tls_snapshot
             )
+
+
+instantiate_device_type_tests(PythonDispatcherTests, globals(), allow_xpu=True)
 
 
 if __name__ == "__main__":
