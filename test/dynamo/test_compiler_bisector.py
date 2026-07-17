@@ -84,7 +84,7 @@ class TestCompilerBisector(TestCase):
         def test_fn():
             torch._dynamo.reset()
             with patch_exp_decomp():
-                vq_compiled = torch.compile(vq)
+                vq_compiled = torch.compile(vq)  # noqa: UNSPECIFIED_BACKEND
                 x = torch.randn(4, 400, 256, device=GPU_TYPE)
                 with torch._dynamo.utils.preserve_rng_state():
                     vq(x)
