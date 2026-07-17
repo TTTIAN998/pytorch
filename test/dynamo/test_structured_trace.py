@@ -372,7 +372,7 @@ class StructuredTraceTest(TestCase):
 
     @requires_gpu_and_triton
     def test_gpugraphs(self):
-        fn_opt = torch.compile(mode="reduce-overhead")(inductor_schedule_fn)
+        fn_opt = torch.compile(mode="reduce-overhead")(inductor_schedule_fn)  # noqa: UNSPECIFIED_BACKEND
         fn_opt(torch.ones(1000, 1000, device=device_type))
         self.assertExpectedInline(
             self.buffer.getvalue(),
