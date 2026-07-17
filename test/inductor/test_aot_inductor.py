@@ -9397,6 +9397,11 @@ copy_tests(
 # Lazy-autotune-mode-specific failures go here. Inherits regular GPU failures.
 GPU_LAZY_AUTOTUNE_TEST_FAILURES = {
     **GPU_TEST_FAILURES,
+    # sycltla v0.9 AOT-compiled flash attention produces incorrect results on XPU
+    # when called multiple times in the same process (regression vs v0.8 JIT).
+    # ABICompatibleGpu passes; DualWrapper is the second AOTI flash call per run.
+    # TODO: re-enable once sycltla fixes the repeated-kernel-call correctness issue.
+    "test_fallback_kernel_with_symexpr_output": fail_gpu(("xpu",), is_skip=True),
 }
 
 
