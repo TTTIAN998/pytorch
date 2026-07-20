@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import unittest
 from io import BytesIO
 from typing import cast
 
@@ -9,7 +10,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed._serialization import _streaming_load, _streaming_save
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
-from torch.testing._internal.common_utils import requires_cuda, run_tests, TestCase
+from torch.testing._internal.common_utils import run_tests, TEST_ACCELERATOR, TestCase
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 
 DEBUG_ENV = "TORCH_SERIALIZATION_DEBUG"
@@ -110,7 +112,7 @@ class TestSerialization(TestCase):
 
     def test_dtensor(self) -> None:
         dist.init_process_group(
-            backend="gloo", rank=0, world_size=1, store=dist.HashStore()
+            backend="fake", rank=0, world_size=1, store=FakeStore()
         )
 
         device_mesh = DeviceMesh("cpu", 1)
@@ -124,6 +126,7 @@ class TestSerialization(TestCase):
         result = cast(DTensor, _streaming_load(file))
         torch.testing.assert_close(result.to_local(), state_dict.to_local())
         self.assertEqual(result._spec, state_dict._spec)
+        dist.destroy_process_group()
 
     def test_python_object(self) -> None:
         state_dict = {
@@ -164,9 +167,14 @@ class TestSerialization(TestCase):
         with self.assertRaisesRegex(RuntimeError, "explicit pickle_module"):
             _streaming_load(file, weights_only=True, pickle_module=pickle)
 
-    @requires_cuda
-    def test_cuda(self) -> None:
-        device = torch.device("cuda:0")
+    @unittest.skipIf(not TEST_ACCELERATOR, "requires accelerator.")
+    def test_accelerator(self) -> None:
+        device_type = (
+            acc.type
+            if (acc := torch.accelerator.current_accelerator(check_available=True))
+            else "cpu"
+        )
+        device = torch.device(f"{device_type}:0")
 
         tensor = torch.tensor(42, dtype=torch.float, device=device)
         state_dict = {"scalar": tensor}
@@ -177,6 +185,25 @@ class TestSerialization(TestCase):
         result = _streaming_load(file)
         torch.testing.assert_close(result, state_dict)
         self.assertEqual(result["scalar"].device, device)
+
+    @unittest.skipIf(not TEST_ACCELERATOR, "requires accelerator.")
+    def test_accelerator_map_location(self) -> None:
+        device_type = (
+            acc.type
+            if (acc := torch.accelerator.current_accelerator(check_available=True))
+            else "cpu"
+        )
+        device = torch.device(f"{device_type}:0")
+
+        tensor = torch.tensor(42, dtype=torch.float, device=device)
+        state_dict = {"scalar": tensor}
+        file = BytesIO()
+        _streaming_save(state_dict, file)
+        file.seek(0)
+
+        result = _streaming_load(file, map_location="cpu")
+        self.assertEqual(result["scalar"].device, torch.device("cpu"))
+        torch.testing.assert_close(result["scalar"].cpu(), tensor.cpu())
 
 
 if __name__ == "__main__":
