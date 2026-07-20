@@ -12,6 +12,7 @@ from torch._higher_order_ops.map import _fake_map
 from torch._higher_order_ops.scan import _fake_scan, scan
 from torch._inductor.custom_graph_pass import CustomGraphPass
 from torch._inductor.test_case import TestCase
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import (
     decorateIf,
     instantiate_parametrized_tests,
@@ -1703,7 +1704,7 @@ class AssociativeScanTests(TestCase):
     # This is under investigations in
     # https://github.com/pytorch/pytorch/issues/131805
     @decorateIf(unittest.skip, lambda params: params["device"] == GPU_TYPE)
-    def test_associative_scan_CUDA_flip(self, combine_mode, backend, device):
+    def test_associative_scan_gpu_flip(self, combine_mode, backend, device):
         def fct(x: torch.Tensor, y: torch.Tensor):
             return x + y
 
@@ -1722,7 +1723,7 @@ class AssociativeScanTests(TestCase):
                         fct, x, 0, reverse=False, combine_mode=combine_mode
                     )
 
-                # Skipping test because combine_mode currently only supports CUDA tensors
+                # Skipping test because combine_mode currently only supports gpu tensors
                 return
 
             result1 = associative_scan1(
@@ -2486,6 +2487,12 @@ instantiate_parametrized_tests(AssociativeScanTests)
 instantiate_parametrized_tests(ScanTests)
 instantiate_parametrized_tests(MapTests)
 
+
+instantiate_device_type_tests(CondTests, globals())
+instantiate_device_type_tests(WhileLoopTests, globals())
+instantiate_device_type_tests(AssociativeScanTests, globals())
+instantiate_device_type_tests(ScanTests, globals())
+instantiate_device_type_tests(MapTests, globals())
 
 if __name__ == "__main__":
     from torch._inductor.test_case import run_tests
