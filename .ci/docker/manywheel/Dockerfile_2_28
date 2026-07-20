@@ -171,6 +171,26 @@ RUN bash ./install_rocSHMEM.sh ${ROCM_VERSION} && rm install_rocSHMEM.sh
 ADD ./common/install_miopen.sh install_miopen.sh
 RUN bash ./install_miopen.sh ${ROCM_VERSION} && rm install_miopen.sh
 
+FROM cpu_final as rocm_wheel_final
+ARG PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH ${PYTORCH_ROCM_ARCH}
+ARG DEVTOOLSET_VERSION=13
+# ROCm is installed from the multi-arch TheRock wheel index instead of the
+# rocm/dev-almalinux-8 OS packages. install_rocm_wheel.sh pip-installs the ROCm
+# SDK (it unpacks under <site-packages>/_rocm_sdk_core) and writes
+# /etc/rocm_env.sh pointing at that real install root; build_env_setup.py and
+# repair_wheel.py discover ROCM_HOME from there. No /opt/rocm symlink is created.
+ARG THEROCK_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ARG THEROCK_VERSION=7.14
+ENV MKLROOT /opt/intel
+# cmake-3.28.4 from pip to get enable_language(HIP)
+RUN python3 -m pip install --upgrade pip && \
+    python3 -mpip install cmake==3.28.4
+ADD ./common/install_rocm_wheel.sh install_rocm_wheel.sh
+RUN THEROCK_INDEX_URL=${THEROCK_INDEX_URL} THEROCK_VERSION=${THEROCK_VERSION} bash ./install_rocm_wheel.sh && rm install_rocm_wheel.sh
+# ROCm rocm-smi depends on the system drm.h header
+RUN yum install -y libdrm-devel
+
 FROM cpu_final as xpu_final
 # XPU CD use rolling driver
 ENV XPU_DRIVER_TYPE ROLLING
