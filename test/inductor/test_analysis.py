@@ -29,7 +29,7 @@ from torch.testing._internal.common_utils import (
     TestCase,
     xfailIfNoAcceleratorTriton,
 )
-from torch.testing._internal.inductor_utils import IS_BIG_GPU, HAS_TRITON
+from torch.testing._internal.inductor_utils import HAS_TRITON, IS_BIG_GPU
 
 
 example_profile = """
@@ -285,7 +285,11 @@ class TestUtils(TestCase):
 
 def has_supported_gpu():
     """Check if any GPU platform with Triton support is available."""
-    return (torch.accelerator.is_available() and HAS_TRITON) or SM80OrLater or torch.version.hip
+    return (
+        (torch.accelerator.is_available() and HAS_TRITON)
+        or SM80OrLater
+        or torch.version.hip
+    )
 
 
 class TestAnalysis(TestCase):
@@ -644,9 +648,7 @@ class TestAnalysis(TestCase):
 
         # Verify device properties are present
         self.assertIn("deviceProperties", combined_profile)
-        acc = torch.accelerator.current_accelerator()
-        if acc is not None and torch.get_device_module(acc.type).is_available():
-            self.assertGreater(len(combined_profile["deviceProperties"]), 0)
+        self.assertGreater(len(combined_profile["deviceProperties"]), 0)
 
         # Verify some trace events from each original profile are present
         combined_event_names = {
