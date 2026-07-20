@@ -45,8 +45,9 @@ class TestCollectiveAutotuning2Ranks(MultiProcessTestCase):
 
         dist.barrier()
 
+        device_type = getattr(torch.accelerator.current_accelerator(), "type", None)
         rank = dist.get_rank()
-        device = f"cuda:{rank}"
+        device = f"{device_type}:{rank}"
 
         from torch._C._distributed_c10d import _register_process_group
 
@@ -127,8 +128,9 @@ class TestCollectiveAutotuning4Ranks(MultiProcessTestCase):
 
         dist.barrier()
 
+        device_type = getattr(torch.accelerator.current_accelerator(), "type", None)
         rank = dist.get_rank()
-        device = f"cuda:{rank}"
+        device = f"{device_type}:{rank}"
 
         from torch._C._distributed_c10d import _register_process_group
 
