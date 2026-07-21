@@ -43,6 +43,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     IS_WINDOWS,
     parametrize,
+    requires_cuda,
     run_tests,
     skipIfCrossRef,
     skipIfRocm,
