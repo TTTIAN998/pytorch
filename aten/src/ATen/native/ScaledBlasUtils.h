@@ -204,4 +204,4 @@ TORCH_API
 bool scaled_mm_allowed_device(bool sm90_only = false, bool sm100_only = false);
 #endif
 
-} // namespace at::scaled
+} // namespace at::native::scaled
