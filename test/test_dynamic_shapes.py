@@ -6,6 +6,7 @@ import itertools
 import math
 import operator
 import unittest
+from unittest import mock
 
 import numpy as np
 import sympy
@@ -15,6 +16,7 @@ import torch.fx
 import torch.nn.functional as F
 from torch import sym_int, SymBool, SymFloat, SymInt
 from torch._C import _disabled_torch_function_impl
+from torch._dynamo.source import ConstantSource
 from torch._dynamo.testing import (
     AotEagerAndRecordGraphs,
     CompileCounter,
@@ -43,6 +45,7 @@ from torch.fx.experimental.symbolic_shapes import (
     StatelessSymbolicContext,
     statically_known_false,
     statically_known_true,
+    StrictMinMaxConstraint,
     SYMPY_INTERP,
 )
 from torch.testing._internal.common_dtype import all_types_and
@@ -71,6 +74,7 @@ from torch.utils._sympy.functions import (
     Min,
     Mod,
 )
+from torch.utils._sympy.value_ranges import ValueRanges
 
 
 aten = torch.ops.aten
@@ -1738,6 +1742,48 @@ class f(torch.nn.Module):
             self.assertEqual(
                 f(torch.tensor([1]), torch.tensor([1])), torch.tensor([20])
             )
+
+    def test_unspecified_zero_one_symint_can_broadcast(self):
+        from torch._refs import _broadcast_shapes
+
+        shape_env = ShapeEnv()
+        s3 = shape_env.create_unspecified_symint_and_symbol(
+            3,
+            ConstantSource("s3"),
+            DimDynamic.DYNAMIC,
+        )
+        s1 = shape_env.create_unspecified_symint_and_symbol(
+            1,
+            ConstantSource("s1"),
+            DimDynamic.DYNAMIC,
+        )
+
+        self.assertNotIn(s1.node.expr, shape_env.do_not_specialize_zero_one_symbols)
+        self.assertEqual(_broadcast_shapes((s3,), (s1,)), [s3])
+
+    def test_zero_one_opt_out_uses_nonnegative_symbol(self):
+        shape_env = ShapeEnv()
+        shape_env._translation_validation_enabled = True
+        shape_env.validator = mock.Mock()
+
+        symbol = shape_env.create_symbol(
+            0,
+            ConstantSource("s0"),
+            DimDynamic.DYNAMIC,
+            StrictMinMaxConstraint(
+                vr=ValueRanges(0, 5),
+                warn_only=False,
+            ),
+            do_not_specialize_zero_one=True,
+            skip_zero_one_guard_specialization=True,
+        )
+
+        self.assertTrue(symbol.is_nonnegative)
+        self.assertIsNone(symbol.is_positive)
+        self.assertIsNot(sympy.Eq(symbol, 0), sympy.S.false)
+        shape_env.validator.add_assertion.assert_called_once_with(
+            sympy.Ge(symbol, 0, evaluate=False)
+        )
 
     @fresh_cache()
     def test_slice_backed_size_oblivious(self):
