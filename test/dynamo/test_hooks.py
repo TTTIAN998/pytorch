@@ -19,6 +19,9 @@ from torch.testing._internal.common_utils import skipIfRocm
 from torch.utils.hooks import RemovableHandle
 
 
+REMOVABLE_HANDLE_ALIAS = RemovableHandle
+
+
 def compiler_fn(gm):
     return torch.compile(gm, backend="inductor", fullgraph=True, dynamic=True)
 
@@ -139,6 +142,65 @@ class HooksTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(cnt.frame_count, 1)
         self.assertIsInstance(h, RemovableHandle)
         self.assertIs(h2, h)
+
+    def test_removable_handle_next_id_class_attr_mutation(self):
+        start_next_id = RemovableHandle.next_id
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        def fn(x):
+            RemovableHandle.next_id += 1
+            return x + RemovableHandle.next_id
+
+        try:
+            opt_fn = torch.compile(fn, backend=cnt, fullgraph=True)
+
+            x = torch.randn(2)
+            self.assertEqual(opt_fn(x), x + start_next_id + 1)
+            self.assertEqual(RemovableHandle.next_id, start_next_id + 1)
+            self.assertEqual(cnt.frame_count, 1)
+        finally:
+            RemovableHandle.next_id = start_next_id
+
+    def test_removable_handle_class_attr_mutation_alias_read(self):
+        start_next_id = RemovableHandle.next_id
+
+        def fn(x):
+            next_id = REMOVABLE_HANDLE_ALIAS.next_id
+            RemovableHandle.next_id = next_id + 1
+            return x + REMOVABLE_HANDLE_ALIAS.next_id
+
+        try:
+            x = torch.randn(2)
+            opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+
+            self.assertEqual(opt_fn(x), x + start_next_id + 1)
+            self.assertEqual(RemovableHandle.next_id, start_next_id + 1)
+        finally:
+            RemovableHandle.next_id = start_next_id
+
+    def test_register_forward_hook_inside_forward_fullgraph(self):
+        class Mod(torch.nn.Module):
+            def forward(self, x):
+                self.register_forward_hook(lambda module, inputs, output: output + 1)
+                return x + 1
+
+        start_next_id = RemovableHandle.next_id
+        mod = Mod()
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        try:
+            x = torch.randn(2)
+            opt_mod = torch.compile(mod, backend=cnt, fullgraph=True)
+
+            self.assertEqual(opt_mod(x), x + 1)
+            self.assertEqual(list(mod._forward_hooks.keys()), [start_next_id])
+            self.assertEqual(RemovableHandle.next_id, start_next_id + 1)
+            self.assertEqual(cnt.frame_count, 1)
+        finally:
+            mod._forward_hooks.clear()
+            mod._forward_hooks_with_kwargs.clear()
+            mod._forward_hooks_always_called.clear()
+            RemovableHandle.next_id = start_next_id
 
     def test_tensor_register_hook_repeated_handle_not_local(self):
         def fn(x, y, z, mod):
