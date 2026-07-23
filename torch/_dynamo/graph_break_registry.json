@@ -5477,6 +5477,17 @@
       ]
     }
   ],
+  "GB9745": [
+    {
+      "Gb_type": "autograd.grad inside activation checkpoint",
+      "Context": "activation checkpoint body",
+      "Explanation": "torch.autograd.grad() cannot be safely captured inside torch.utils.checkpoint.checkpoint(). Checkpoint's caching dispatch modes do not support running backward while the checkpoint body is active.",
+      "Hints": [
+        "Move the autograd.grad() call outside the checkpointed function.",
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0340": [
     {
       "Gb_type": "torch.cond: unsupported branch return type",
