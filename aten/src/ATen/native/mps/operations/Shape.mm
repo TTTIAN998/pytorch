@@ -153,6 +153,20 @@ static void cat_out_mps_impl(const ITensorListRef& inputs, int64_t dimension, co
     input_idx++;
   }
 }
+
+// The cat kernel computes linear input/output offsets as
+// sum(stride[dim] * dim_idx) in the index type, so 32-bit indexing requires
+// the largest linear offset, not just each dim size, to fit in int32.
+static bool needs_64bit_indexing(const Tensor& t) {
+  if (t.numel() == 0) {
+    return false;
+  }
+  int64_t max_linear_offset = 0;
+  for (const auto dim : c10::irange(t.dim())) {
+    max_linear_offset += t.stride(dim) * (t.size(dim) - 1);
+  }
+  return max_linear_offset > std::numeric_limits<int32_t>::max();
+}
 } // namespace mps
 
 TORCH_IMPL_FUNC(cat_out_mps)
@@ -171,10 +185,10 @@ TORCH_IMPL_FUNC(cat_out_mps)
   }
 
   auto materialized_inputs = inputs.materialize();
-  bool has_large_tensor =
-      isTooLargeForMPSGraph(out) || std::any_of(materialized_inputs.begin(), materialized_inputs.end(), [](auto& t) {
-        return !cat_should_skip_tensor(t) && isTooLargeForMPSGraph(t);
-      });
+  bool has_large_tensor = needs_64bit_indexing(out) || isTooLargeForMPSGraph(out) ||
+      std::any_of(materialized_inputs.begin(), materialized_inputs.end(), [](auto& t) {
+                            return !cat_should_skip_tensor(t) && (isTooLargeForMPSGraph(t) || needs_64bit_indexing(t));
+                          });
 
   if (all_contiguous && all_same_dtype && (memory_format == MemoryFormat::Contiguous) && (dimension == 0)) {
     return mps::cat_out_mps_contiguous_impl(materialized_inputs, out);
