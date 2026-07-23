@@ -654,7 +654,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
             body.append(line)
         return "\n".join(body)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
     @torch._inductor.config.patch(fx_graph_cache=False, fx_graph_remote_cache=False)
     def test_nested_region_inductor_config_multi_kernel_codegen(self):
@@ -675,7 +675,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
             return g(y)
 
         opt_fn = torch.compile(fn, backend="inductor", fullgraph=True)
-        x = torch.randn(4096, 256, device="cuda")
+        x = torch.randn(4096, 256, device=device_type)
         result, codes = run_and_get_code(lambda: opt_fn(x))
 
         self.assertEqual(result, fn(x))
@@ -685,7 +685,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
         self.assertIn("multi_kernel", region_code)
         self.assertNotIn("multi_kernel", parent_code)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
     def test_nested_region_inductor_config_persistent_reduction_codegen(self):
         # triton.persistent_reductions=False set only on the region forces its
@@ -704,7 +704,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
             return g(y)
 
         opt_fn = torch.compile(fn, backend="inductor", fullgraph=True)
-        x = torch.randn(4096, 256, device="cuda")
+        x = torch.randn(4096, 256, device=device_type)
         result, codes = run_and_get_code(lambda: opt_fn(x))
 
         self.assertEqual(result, fn(x))
@@ -715,7 +715,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
         self.assertNotIn("triton_per_", region_code)
         self.assertIn("triton_per_", parent_code)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
     def test_nested_region_separate_fw_bw_inductor_config(self):
         # A region can compile its forward and backward under different inductor
@@ -733,7 +733,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
             return (g(x) * 3).sum()
 
         opt_fn = torch.compile(fn, backend="inductor", fullgraph=True)
-        x = torch.randn(4096, 256, device="cuda", requires_grad=True)
+        x = torch.randn(4096, 256, device=device_type, requires_grad=True)
         result, codes = run_fw_bw_and_get_code(lambda: opt_fn(x))
 
         self.assertEqual(result, fn(x))
@@ -745,7 +745,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
         self.assertIn("triton_red_", bw_code)
         self.assertNotIn("triton_per_", bw_code)
 
-    @requires_cuda_and_triton
+    @requires_gpu_and_triton
     @torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
     def test_nested_region_fw_bw_inductor_config_both_set(self):
         # Forward and backward set to different explicit configs: the forward
@@ -764,7 +764,7 @@ class RegionalInductorInvokeSubgraphTests(torch._inductor.test_case.TestCase):
             return (g(x) * 3).sum()
 
         opt_fn = torch.compile(fn, backend="inductor", fullgraph=True)
-        x = torch.randn(4096, 256, device="cuda", requires_grad=True)
+        x = torch.randn(4096, 256, device=device_type, requires_grad=True)
         result, codes = run_fw_bw_and_get_code(lambda: opt_fn(x))
 
         self.assertEqual(result, fn(x))
