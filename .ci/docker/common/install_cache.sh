@@ -2,16 +2,28 @@
 
 set -ex
 
+# Build sccache from source at v0.16.0 with the nvcc 13.3 dryrun-parsing fix
+# backported from mozilla/sccache#2722 (see
+# patches/sccache-nvcc-13.3-dryrun-parsing.patch). The prebuilt release binary
+# mis-parses nvcc 13.3+ --dryrun output (it skips the device compile, leaving
+# "fatbinary: Could not open input file '*.cubin'"), so build from source until
+# a fixed sccache release ships. Reverts #189365 (prebuilt-binary download).
 install_ubuntu() {
-  ARCH=$(uname -m)
-  VERSION=0.16.0
-  FEATURES="sccache sccache-dist"
-  echo "Downloading sccache binaries from GitHub mozilla/sccache release"
-  for feature in $FEATURES; do
-    curl --retry 3 -fsSL https://github.com/mozilla/sccache/releases/download/v${VERSION}/${feature}-v${VERSION}-${ARCH}-unknown-linux-musl.tar.gz | \
-      tar -xz -C /opt/cache/bin --strip-components=1 ${feature}-v${VERSION}-${ARCH}-unknown-linux-musl/${feature}
-    chmod a+x /opt/cache/bin/${feature}
-  done
+  local VERSION=0.16.0
+  echo "Building sccache ${VERSION} from source with the nvcc 13.3 dryrun fix"
+  apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl git ca-certificates
+  curl https://sh.rustup.rs -sSf | sh -s -- -y
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+  git clone --depth 1 --branch "v${VERSION}" https://github.com/mozilla/sccache /tmp/sccache
+  local patch=/opt/cache/patches/sccache-nvcc-13.3-dryrun-parsing.patch
+  [ -f "$patch" ] || { echo "ERROR: $patch missing; the Dockerfile must 'COPY ./common/patches /opt/cache/patches'"; exit 1; }
+  git -C /tmp/sccache apply "$patch"
+  cargo build --manifest-path /tmp/sccache/Cargo.toml --release --features="dist-client dist-server"
+  cp /tmp/sccache/target/release/sccache /opt/cache/bin
+  cp /tmp/sccache/target/release/sccache-dist /opt/cache/bin
+  chmod a+x /opt/cache/bin/sccache /opt/cache/bin/sccache-dist
+  rm -rf /tmp/sccache "$HOME/.cargo" "$HOME/.rustup"
 
   echo "Downloading old sccache binary from S3 repo for PCH builds"
   curl --retry 3 https://s3.amazonaws.com/ossci-linux/sccache -o /opt/cache/bin/sccache-0.2.14a
