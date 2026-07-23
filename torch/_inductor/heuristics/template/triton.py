@@ -2706,6 +2706,13 @@ class BlackwellTMATemplateConfigMixin(TMATemplateConfigMixin):
             subtiles = [base_subtile]
             if base_subtile < 8 and block_n // 8 >= 32:
                 subtiles.append(8)
+            # 2-CTA needs the TMA epilogue store to participate in the cluster
+            # barrier protocol; without it the cluster deadlocks. Requiring
+            # enable_template_tma_store also means the output was already
+            # validated as TMA-storable during template selection.
+            two_ctas_choices = (
+                (False, True) if config.triton.enable_template_tma_store else (False,)
+            )
             for epilogue_subtile in subtiles:
                 if block_n // epilogue_subtile < 32:
                     continue
@@ -2714,13 +2721,25 @@ class BlackwellTMATemplateConfigMixin(TMATemplateConfigMixin):
                     if data_partition_factor == 2 and block_m != 256:
                         continue
                     for separate_epilogue_store in (False, True):
-                        yield {
-                            **base_kwargs,
-                            "USE_META_WS": True,
-                            "EPILOGUE_SUBTILE": epilogue_subtile,
-                            "DATA_PARTITION_FACTOR": data_partition_factor,
-                            "SEPARATE_EPILOGUE_STORE": separate_epilogue_store,
-                        }
+                        for two_ctas in two_ctas_choices:
+                            # 2-CTA needs a 128-row MMA tile per partition and
+                            # BLOCK_N >= 128.
+                            if two_ctas and (
+                                block_m // data_partition_factor != 128
+                                or block_n < 128
+                            ):
+                                continue
+                            config_kwargs = {
+                                **base_kwargs,
+                                "USE_META_WS": True,
+                                "EPILOGUE_SUBTILE": epilogue_subtile,
+                                "DATA_PARTITION_FACTOR": data_partition_factor,
+                                "SEPARATE_EPILOGUE_STORE": separate_epilogue_store,
+                                "TWO_CTAS": two_ctas,
+                            }
+                            if two_ctas:
+                                config_kwargs["ctas_per_cga"] = (2, 1, 1)
+                            yield config_kwargs
 
     @staticmethod
     def _generate_exhaustive_configs() -> list[BaseConfig]:
