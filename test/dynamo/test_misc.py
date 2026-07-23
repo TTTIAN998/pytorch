@@ -15487,6 +15487,195 @@ fn
 
         self.assertEqual(expected, actual)
 
+    def test_data_ptr_tensor_constructor_fullgraph(self):
+        class CaptureGraph:
+            def __init__(self):
+                self.graph = None
+
+            def __call__(self, gm, example_inputs):
+                self.graph = gm
+                return gm
+
+        def f(x, y):
+            return torch.tensor([x.data_ptr(), y.data_ptr()], device=x.device)
+
+        backend = CaptureGraph()
+        x = torch.randn(4)
+        y = torch.randn(5)
+
+        expected = f(x, y)
+        actual = torch.compile(f, backend=backend, fullgraph=True)(x, y)
+
+        self.assertEqual(expected, actual)
+        self.assertIsNotNone(backend.graph)
+        FileCheck().check("torch.ops.prims._data_ptr.default").run(backend.graph.code)
+
+    def test_data_ptr_scalar_tensor_fullgraph(self):
+        class CaptureGraph:
+            def __init__(self):
+                self.graph = None
+
+            def __call__(self, gm, example_inputs):
+                self.graph = gm
+                return gm
+
+        def f(x):
+            return torch.scalar_tensor(x.data_ptr(), device=x.device)
+
+        backend = CaptureGraph()
+        x = torch.randn(4)
+
+        expected = f(x)
+        actual = torch.compile(f, backend=backend, fullgraph=True)(x)
+
+        self.assertEqual(expected, actual)
+        self.assertIsNotNone(backend.graph)
+        FileCheck().check("torch.ops.prims._data_ptr.default").run(backend.graph.code)
+
+    def test_data_ptr_source_is_hidden_graph_output(self):
+        class CaptureGraph:
+            def __init__(self):
+                self.graph = None
+
+            def __call__(self, gm, example_inputs):
+                self.graph = gm
+                return gm
+
+        def f(x):
+            tmp = x + 1
+            return torch.scalar_tensor(tmp.data_ptr(), dtype=torch.long)
+
+        backend = CaptureGraph()
+        actual = torch.compile(f, backend=backend, fullgraph=True)(torch.randn(4))
+
+        self.assertNotEqual(actual.item(), 0)
+        self.assertIsNotNone(backend.graph)
+        output = next(node for node in backend.graph.graph.nodes if node.op == "output")
+        self.assertEqual(len(output.args[0]), 2)
+        self.assertEqual(output.args[0][1].target, operator.add)
+
+    def test_data_ptr_skips_frames_with_graph_breaks(self):
+        class CaptureGraphs:
+            def __init__(self):
+                self.graphs = []
+
+            def __call__(self, gm, example_inputs):
+                self.graphs.append(gm)
+                return gm
+
+        def f(x):
+            tmp = x + 1
+            packed = torch.scalar_tensor(tmp.data_ptr(), dtype=torch.long)
+            torch._dynamo.graph_break()
+            return packed
+
+        backend = CaptureGraphs()
+        x = torch.randn(4)
+
+        actual = torch.compile(f, backend=backend)(x)
+
+        self.assertNotEqual(actual.item(), 0)
+        self.assertEqual(backend.graphs, [])
+
+    def test_data_ptr_rejected_in_higher_order_operator_subgraph(self):
+        def true_fn(x):
+            tmp = x + 1
+            return torch.scalar_tensor(tmp.data_ptr(), dtype=torch.long)
+
+        def false_fn(x):
+            tmp = x + 2
+            return torch.scalar_tensor(tmp.data_ptr(), dtype=torch.long)
+
+        def f(pred, x):
+            return torch.cond(pred, true_fn, false_fn, (x,))
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"data_ptr\(\) in a higher-order operator",
+        ):
+            torch.compile(f, backend="eager", fullgraph=True)(
+                torch.tensor(True), torch.randn(4)
+            )
+
+    def test_data_ptr_rejected_in_export(self):
+        def f(x):
+            tmp = x + 1
+            return torch.scalar_tensor(tmp.data_ptr(), dtype=torch.long)
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.Unsupported,
+            r"data_ptr\(\) in export",
+        ):
+            torch._dynamo.export(f)(torch.randn(4))
+
+    def test_data_ptr_read_before_storage_mutation(self):
+        class CaptureGraph:
+            def __init__(self):
+                self.graph = None
+
+            def __call__(self, gm, example_inputs):
+                self.graph = gm
+                return gm
+
+        def f(x):
+            ptr = x.data_ptr()
+            x.untyped_storage().resize_(x.untyped_storage().size() * 8 + 1024)
+            return torch.tensor([ptr])
+
+        backend = CaptureGraph()
+        x = torch.randn(4)
+        expected_ptr = x.data_ptr()
+
+        actual = torch.compile(f, backend=backend, fullgraph=True)(x)
+
+        self.assertEqual(actual, torch.tensor([expected_ptr]))
+        self.assertIsNotNone(backend.graph)
+        FileCheck().check("torch.ops.prims._data_ptr.default").check(
+            "torch.ops.inductor.resize_storage_bytes_"
+        ).run(backend.graph.code)
+
+    def test_data_ptr_current_storage_version_read_is_side_effect_free(self):
+        from torch._dynamo.variables.tensor import DataPtrVariable
+
+        graph = torch.fx.Graph()
+        node = graph.placeholder("x")
+        storage_versions = {}
+
+        self.assertEqual(
+            DataPtrVariable.current_storage_version(storage_versions, node), 0
+        )
+        self.assertEqual(storage_versions, {})
+
+    def test_data_ptr_storage_version_is_trace_local(self):
+        from torch._dynamo.variables.tensor import DataPtrVariable
+
+        graph = torch.fx.Graph()
+        node = graph.placeholder("x")
+        node.meta["example_value"] = torch.randn(4)
+        first_trace_versions = {}
+        second_trace_versions = {}
+
+        DataPtrVariable.bump_storage_version(second_trace_versions, node)
+
+        self.assertEqual(
+            DataPtrVariable.current_storage_version(first_trace_versions, node), 0
+        )
+        self.assertEqual(
+            DataPtrVariable.current_storage_version(second_trace_versions, node), 1
+        )
+
+    def test_const_data_ptr_tensor_constructor_unsupported(self):
+        def f(x):
+            return torch.tensor([x.const_data_ptr()])
+
+        x = torch.randn(4)
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.Unsupported,
+            "Failed to convert args/kwargs to proxy",
+        ):
+            torch.compile(f, backend="eager", fullgraph=True)(x)
+
     def test_data_ptr_equality_after_mutation_graph_break(self):
         def f(x):
             ptr_before = x.data_ptr()
@@ -15501,6 +15690,21 @@ fn
 
         expected = f(x.clone())
         actual = torch.compile(f, backend="eager")(x.clone())
+
+        self.assertEqual(expected, actual)
+
+    def test_data_ptr_equality_after_storage_resize_fullgraph(self):
+        def f(x):
+            ptr_before = x.data_ptr()
+            view = x[1:]
+            view.untyped_storage().resize_(view.untyped_storage().size() * 8 + 1024)
+            ptr_after = x.data_ptr()
+            return torch.tensor([ptr_before == ptr_after], dtype=torch.long)
+
+        x = torch.randn(4)
+
+        expected = f(x.clone())
+        actual = torch.compile(f, backend="eager", fullgraph=True)(x.clone())
 
         self.assertEqual(expected, actual)
 
