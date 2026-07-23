@@ -3247,6 +3247,7 @@ class TestControlFlowDevice(TestCase):
             ],
         )
 
+    @skipIfTorchDynamo("Graph is not captured by backend if test with dynamo")
     @unittest.skipIf(TEST_CUDA and not SM70OrLater, "triton")
     @parametrize("reverse", [False, True])
     @parametrize("compile_mode", ["none", "eager"])
