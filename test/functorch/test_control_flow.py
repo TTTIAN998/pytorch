@@ -3994,6 +3994,7 @@ class TestControlFlowDevice(TestCase):
             inp_flat = pytree.tree_leaves(inp)
             self.check_autograd(result, expected_result, (*init_flat, *inp_flat))
 
+    @skipIfTorchDynamo("Graph is not captured by backend if test with dynamo")
     @unittest.skipIf(TEST_CUDA and not SM70OrLater, "triton")
     @parametrize("reverse", [False, True])
     @parametrize("compile_mode", ["none", "eager"])
