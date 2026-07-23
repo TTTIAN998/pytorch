@@ -1193,9 +1193,7 @@ class TestHasTriton(TestCase):
         self.assertTrue(self._run([("fake", _make_triton_interface())]))
 
     def test_device_not_available(self):
-        self.assertFalse(
-            self._run([("fake", _make_triton_interface(available=False))])
-        )
+        self.assertFalse(self._run([("fake", _make_triton_interface(available=False))]))
 
     def test_device_not_triton_capable(self):
         self.assertFalse(self._run([("fake", _make_triton_interface(capable=False))]))
