@@ -1064,6 +1064,101 @@ class TestNVUniversalGemmEpilogueFusion(TestCase):
         self.assertTrue(epilogue_fused)
         self.assertNotIn("out_ptr1", code)
 
+    def test_scaled_mm_multi_store_epilogue_fusion(self):
+        m, n, k = self.M, self.N, self.K
+        packed_k = k // 2
+        a = _create_tensor_with_layout(
+            "contiguous", m, packed_k, torch.float4_e2m1fn_x2
+        )
+        b = torch.randint(
+            0, 256, (n, packed_k), device="cuda", dtype=torch.uint8
+        ).view(torch.float4_e2m1fn_x2)
+        b = b.T
+        padded_k_blocks = _round_up(ceildiv(k, 16), 4)
+        scale_a = torch.rand(
+            _round_up(m, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+        scale_b = torch.rand(
+            _round_up(n, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+
+        def fn(a, b, scale_a, scale_b):
+            result = torch._scaled_mm(
+                a,
+                b,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                out_dtype=torch.bfloat16,
+            )
+            result_fp32 = result.float()
+            return result, torch.relu(result_fp32), result_fp32 * 0.5
+
+        result, code, epilogue_fused = self._compile_and_check(
+            fn, a, b, scale_a, scale_b
+        )
+        expected = fn(a, b, scale_a, scale_b)
+        self.assertEqual(result, expected)
+        self.assertTrue(epilogue_fused)
+        self.assertIn("out_ptr1", code)
+        self.assertIn("out_ptr2", code)
+
+    @parametrize(
+        "case",
+        (
+            ((((M, N), torch.bfloat16),), True),
+            ((((N,), torch.bfloat16),), True),
+            ((((1, N), torch.bfloat16),), True),
+            ((((M, 1), torch.bfloat16),), True),
+            ((((N,), torch.bfloat16), ((M, 1), torch.bfloat16)), True),
+            ((((N,), torch.float32),), True),
+        ),
+        name_fn=lambda case: "_and_".join(
+            f"{'x'.join(map(str, shape))}_{dtype}" for shape, dtype in case[0]
+        ),
+    )
+    def test_scaled_mm_broadcast_epilogue_fusion(self, case):
+        bias_specs, expected_fused = case
+        m, n, k = self.M, self.N, self.K
+        packed_k = k // 2
+        a = _create_tensor_with_layout(
+            "contiguous", m, packed_k, torch.float4_e2m1fn_x2
+        )
+        b = torch.randint(
+            0, 256, (n, packed_k), device="cuda", dtype=torch.uint8
+        ).view(torch.float4_e2m1fn_x2)
+        b = b.T
+        padded_k_blocks = _round_up(ceildiv(k, 16), 4)
+        scale_a = torch.rand(
+            _round_up(m, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+        scale_b = torch.rand(
+            _round_up(n, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+        biases = tuple(
+            torch.randn(shape, device="cuda", dtype=dtype)
+            for shape, dtype in bias_specs
+        )
+
+        def fn(a, b, scale_a, scale_b, *biases):
+            result = torch._scaled_mm(
+                a,
+                b,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                out_dtype=torch.bfloat16,
+            )
+            for bias in biases:
+                result = result + bias
+            return torch.relu(result)
+
+        result, code, epilogue_fused = self._compile_and_check(
+            fn, a, b, scale_a, scale_b, *biases
+        )
+        self.assertEqual(epilogue_fused, expected_fused)
+        torch.testing.assert_close(
+            result, fn(a, b, scale_a, scale_b, *biases), equal_nan=True
+        )
+
     @parametrize(
         "case",
         (
@@ -1131,6 +1226,42 @@ class TestNVUniversalGemmEpilogueFusion(TestCase):
         self.assertEqual(result[0], expected[0])
         self.assertEqual(result[1], expected[1])
         self.assertIn("'local_reduce_out'", code)
+
+    def test_scaled_mm_grouped_reduce_source_fusion(self):
+        m, n, k, group = 128, 128, 512, 32
+        packed_k = k // 2
+        a = _create_tensor_with_layout(
+            "contiguous", m, packed_k, torch.float4_e2m1fn_x2
+        )
+        b = torch.randint(
+            0, 256, (n, packed_k), device="cuda", dtype=torch.uint8
+        ).view(torch.float4_e2m1fn_x2)
+        b = b.T
+        padded_k_blocks = _round_up(ceildiv(k, 16), 4)
+        scale_a = torch.rand(
+            _round_up(m, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+        scale_b = torch.rand(
+            _round_up(n, 128) * padded_k_blocks, device="cuda"
+        ).to(torch.float8_e4m3fn)
+
+        def fn(a, b, scale_a, scale_b):
+            result = torch._scaled_mm(
+                a,
+                b,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                out_dtype=torch.bfloat16,
+            )
+            grouped = result.float().view(m, -1, group)
+            return torch.relu(result), grouped.square().mean(-1)
+
+        result, code, _ = self._compile_and_check(fn, a, b, scale_a, scale_b)
+        expected = fn(a, b, scale_a, scale_b)
+        self.assertEqual(result[0], expected[0])
+        self.assertEqual(result[1], expected[1])
+        self.assertIn("'local_reduce_out'", code)
+        self.assertIn("'local_reduce_source': 'square'", code)
 
     def test_matmul_add_relu_chained(self):
         """Multi-op pointwise chain (a@b + bias → relu) collapses to one
@@ -1238,6 +1369,24 @@ class TestNVUniversalGemmEpilogueFusion(TestCase):
         result, code, epilogue_fused = self._compile_and_check(fn, a, b, bias)
         torch.testing.assert_close(result, fn(a, b, bias), atol=1e-2, rtol=1e-2)
         self.assertTrue(epilogue_fused, "bias+relu was NOT fused into epilogue")
+
+    @parametrize(
+        "bias_shape",
+        ((N,), (1, N), (M, 1)),
+        name_fn=lambda shape: "x".join(map(str, shape)),
+    )
+    def test_epilogue_with_broadcast_aux_input(self, bias_shape):
+        dtype = torch.bfloat16
+        a = torch.randn(self.M, self.K, device="cuda", dtype=dtype)
+        b = torch.randn(self.K, self.N, device="cuda", dtype=dtype)
+        bias = torch.randn(bias_shape, device="cuda", dtype=dtype)
+
+        def fn(a, b, bias):
+            return torch.relu((a @ b) + bias)
+
+        result, code, epilogue_fused = self._compile_and_check(fn, a, b, bias)
+        torch.testing.assert_close(result, fn(a, b, bias), atol=1e-2, rtol=1e-2)
+        self.assertTrue(epilogue_fused, "broadcast bias+relu was not fused")
 
     def test_efc_disk_cache_round_trip(self):
         """Verify that EFC kernel compiled artifacts can be serialized to disk
