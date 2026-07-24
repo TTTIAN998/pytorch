@@ -13,6 +13,7 @@ from torch._inductor.fx_passes.memory_estimator import (
 from torch._inductor.test_case import run_tests, TestCase as InductorTestCase
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map_only
@@ -340,6 +341,13 @@ class TestMemoryTracker(InductorTestCase):
                 peak1, peak2, "Different scheduling produces different peak memory"
             )
 
+
+instantiate_device_type_tests(
+    TestMemoryProfilingResNet, globals(), except_for="cpu", allow_xpu=True
+)
+instantiate_device_type_tests(
+    TestMemoryTracker, globals(), except_for="cpu", allow_xpu=True
+)
 
 if __name__ == "__main__":
     if HAS_GPU:
