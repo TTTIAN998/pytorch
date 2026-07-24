@@ -41,6 +41,7 @@ from torch._prims_common import (
     ELEMENTWISE_TYPE_PROMOTION_KIND,
     get_computation_dtype,
     is_boolean_dtype,
+    is_complex_dtype,
     is_float_dtype,
     is_integer_dtype,
     Number,
@@ -7840,6 +7841,14 @@ def cumsum(x, axis=None, dtype=None):
             raise AssertionError("expected: axis in [0, -1]")
         dtype = dtype or x.get_dtype()
         return to_dtype(x, dtype, copy=True)
+
+    output_dtype = dtype or x.get_dtype()
+    if (
+        x.get_device().type == "cuda"
+        and torch.are_deterministic_algorithms_enabled()
+        and (is_float_dtype(output_dtype) or is_complex_dtype(output_dtype))
+    ):
+        return fallback_cumsum(x, dim=axis, dtype=dtype)
 
     def combine_fn(a_tuple, b_tuple):
         (a,) = a_tuple

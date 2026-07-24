@@ -13,6 +13,7 @@ from torch._dynamo.utils import counters
 from torch._inductor.test_case import run_tests, TestCase
 from torch._inductor.utils import fresh_cache
 from torch.testing._internal.common_utils import (
+    DeterministicGuard,
     instantiate_parametrized_tests,
     IS_FBCODE,
     parametrize,
@@ -47,6 +48,20 @@ class DeterministicTest(TestCase):
                 self.assertEqual(inductor_config.deterministic, new_val)
         finally:
             torch.use_deterministic_algorithms(old_val, warn_only=True)
+
+    @unittest.skipIf(GPU_TYPE != "cuda", "requires CUDA")
+    def test_cumsum(self):
+        def fn(x):
+            return torch.cumsum(x, dim=0)
+
+        with DeterministicGuard(True):
+            x = torch.randn(1_000_003, device=GPU_TYPE)
+            compiled = torch.compile(fn)
+            expected = fn(x)
+            actual = compiled(x)
+            self.assertEqual(actual, expected)
+            for _ in range(3):
+                self.assertEqual(compiled(x), actual, atol=0, rtol=0)
 
     @parametrize("deterministic", [False, True])
     def test_mm_padding(self, deterministic):
