@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import torch
 import torch._inductor.config as inductor_config
 import torch._inductor.metrics
-from torch._dynamo.testing import CompileCounterWithBackend, normalize_gm
+from torch._dynamo.testing import CompileCounterWithBackend, extract_graph, normalize_gm
 from torch._inductor.codegen.cuda.device_op_overrides import CUDADeviceOpOverrides
 from torch._inductor.codegen.wrapper import (
     EnterCudaStreamContextLine,
@@ -1747,6 +1747,123 @@ class GraphModule(torch.nn.Module):
 # CHECK: synchronize_stream""",
             wrapper_body,
         )
+
+    def test_synchronize_threads_all_prior_sync_data(self):
+        """Two record_events on one stream, both intermediates consumed after
+        synchronize. The synchronize must thread through BOTH intermediates so
+        each consumer is ordered after the barrier -- not just the most recent
+        one. Regression test for stream_sync_deps overwriting (vs accumulating)
+        per-stream passthroughs: the earlier record_event's data must survive
+        the later record_event and reach the synchronize."""
+
+        import operator
+
+        def fn(x, w1, w2):
+            s1 = torch.cuda.Stream()
+            e1 = torch.cuda.Event()
+            e2 = torch.cuda.Event()
+            with torch.cuda.stream(s1):
+                a = x @ w1
+                e1.record()
+                b = a @ w2
+                e2.record()
+            s1.synchronize()
+            return a.sum(), b.sum()
+
+        x = torch.randn(32, 32, device="cuda")
+        w1 = torch.randn(32, 32, device="cuda")
+        w2 = torch.randn(32, 32, device="cuda")
+        expected = fn(x, w1, w2)
+        result, _, fw_graphs, _ = extract_graph(fn, x, w1, w2)
+        self.assertEqual(result, expected)
+
+        # Both consumers must read getitems produced by the synchronize's
+        # control_deps -- confirming both `a` (before the first record) and `b`
+        # are threaded through the barrier, not just the most recent one. Assert
+        # structurally (not on the printed graph, whose placeholder naming is
+        # test-order dependent).
+        graph = fw_graphs[0].graph
+        sync_cd = None
+        for n in graph.nodes:
+            if (
+                n.op == "call_function"
+                and "control_deps" in str(n.target)
+                and isinstance(n.args[1], torch.fx.Node)
+                and "synchronize_stream" in n.args[1].name
+            ):
+                sync_cd = n
+        self.assertIsNotNone(sync_cd, "no synchronize_stream control_deps node found")
+        sums = [
+            n
+            for n in graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.sum.default
+        ]
+        self.assertEqual(len(sums), 2)
+        for s in sums:
+            inp = s.args[0]
+            self.assertTrue(
+                inp.op == "call_function"
+                and inp.target is operator.getitem
+                and inp.args[0] is sync_cd,
+                f"sum consumer {inp} does not route through synchronize_stream barrier",
+            )
+
+    def test_synchronize_event_threads_all_prior_sync_data(self):
+        """synchronize_event is a CPU-side barrier like synchronize_stream/device,
+        so it must thread ALL still-live cross-stream data through -- including an
+        intermediate produced before an earlier record_event on the same stream,
+        not just the value live at the matching event's record point. Regression
+        test that synchronize_event folds in accumulated stream_sync_deps rather
+        than only event_to_passthrough."""
+        import operator
+
+        def fn(x, w1, w2):
+            s = torch.cuda.Stream()
+            e0 = torch.cuda.Event()
+            e1 = torch.cuda.Event()
+            with torch.cuda.stream(s):
+                a = x @ w1
+                e0.record()
+                b = a @ w2
+                e1.record()
+            e1.synchronize()
+            return a.sum(), b.sum()
+
+        x = torch.randn(32, 32, device="cuda")
+        w1 = torch.randn(32, 32, device="cuda")
+        w2 = torch.randn(32, 32, device="cuda")
+        expected = fn(x, w1, w2)
+        result, _, fw_graphs, _ = extract_graph(fn, x, w1, w2)
+        self.assertEqual(result, expected)
+
+        # Both consumers must read getitems produced by the synchronize_event's
+        # control_deps, confirming both are ordered after the CPU barrier -- not
+        # just b (the value live at e1's record point).
+        graph = fw_graphs[0].graph
+        sync_cd = None
+        for n in graph.nodes:
+            if (
+                n.op == "call_function"
+                and "control_deps" in str(n.target)
+                and isinstance(n.args[1], torch.fx.Node)
+                and "synchronize_event" in n.args[1].name
+            ):
+                sync_cd = n
+        self.assertIsNotNone(sync_cd, "no synchronize_event control_deps node found")
+        sums = [
+            n
+            for n in graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.sum.default
+        ]
+        self.assertEqual(len(sums), 2)
+        for s in sums:
+            inp = s.args[0]
+            self.assertTrue(
+                inp.op == "call_function"
+                and inp.target is operator.getitem
+                and inp.args[0] is sync_cd,
+                f"sum consumer {inp} does not route through synchronize_event barrier",
+            )
 
 
 @unittest.skipUnless(TEST_CUDA, "requires CUDA")

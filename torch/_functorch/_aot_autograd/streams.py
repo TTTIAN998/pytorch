@@ -538,6 +538,11 @@ def _collect_wait_stream_forward_deps(graph: torch.fx.Graph) -> dict[Node, list[
     of subsequent compute nodes on the waiting stream that are defined before
     the wait_stream. These must be threaded through the control_deps so that
     the waiting-stream work is ordered after the wait_stream operation.
+
+    Not applied to wait_event: threading arbitrary forward inputs
+    (activations/placeholders) through a wait_event's control_deps can make a
+    saved value non-recomputable and render the min-cut partitioner infeasible,
+    and independent post-wait work is observationally order-independent anyway.
     """
     result: dict[Node, list[Node]] = {}
     nodes_before: set[Node] = set()
@@ -570,6 +575,75 @@ def _collect_wait_stream_forward_deps(graph: torch.fx.Graph) -> dict[Node, list[
     return result
 
 
+def _collect_full_barrier_forward_deps(
+    graph: torch.fx.Graph,
+) -> dict[Node, list[Node]]:
+    """Find pre-barrier values consumed by later work in one reverse traversal."""
+    result: dict[Node, list[Node]] = {}
+    live_inputs: dict[bool, dict[Node, None]] = {False: {}, True: {}}
+    full_barriers = (
+        torch.ops.streams.synchronize_device.default,
+        torch.ops.streams.synchronize_event.default,
+        torch.ops.streams.synchronize_stream.default,
+    )
+    for node in reversed(list(graph.nodes)):
+        if node.op == "call_function" and node.target in full_barriers:
+            partition_live_inputs = live_inputs[is_bwd_node(node)]
+            if partition_live_inputs:
+                result[node] = list(partition_live_inputs)
+            continue
+        if node.op != "call_function" or node.target in _SYNC_OPS:
+            continue
+        partitions = {is_bwd_node(node)}
+        partitions.update(
+            is_backward for is_backward, inputs in live_inputs.items() if node in inputs
+        )
+        for is_backward in partitions:
+            live_inputs[is_backward].pop(node, None)
+
+        def _collect(n: Node) -> Node:
+            if "val" in n.meta:
+                for is_backward in partitions:
+                    live_inputs[is_backward][n] = None
+            return n
+
+        map_arg(node.args, _collect)
+        map_arg(node.kwargs, _collect)
+    return result
+
+
+def _collect_full_barrier_deps(
+    stream_to_nodes: dict[int | None, list[Node]],
+    stream_sync_deps: dict[int | None, list[Node]],
+    bwd: bool = False,
+) -> list[Node]:
+    """Collect all still-live cross-stream deps for a full CPU barrier
+    (synchronize_stream/device/event).
+
+    These ops block the CPU, so a consumer is only ordered after them by an
+    explicit control_deps edge (nothing on the consumer's stream waits for a CPU
+    barrier). Includes live compute nodes (stream_to_nodes) plus the ctrl/
+    passthrough nodes accumulated by prior sync ops that already cleared
+    stream_to_nodes (stream_sync_deps), deduped by identity preserving order.
+
+    ``bwd`` marks a backward barrier: its accumulated sync deps are filtered to
+    backward nodes only, so it never depends on a forward control_deps node.
+    That edge would cross the fwd/bwd boundary onto a node that is neither
+    saveable nor recomputable, making the min-cut partitioner infeasible.
+    Forward compute deps (stream_to_nodes) are kept -- backward legitimately
+    depends on forward activations.
+    """
+    all_deps = [n for nodes in stream_to_nodes.values() for n in nodes]
+    seen = {id(n) for n in all_deps}
+    for deps in stream_sync_deps.values():
+        for dep in deps:
+            if id(dep) in seen or (bwd and not is_bwd_node(dep)):
+                continue
+            all_deps.append(dep)
+            seen.add(id(dep))
+    return all_deps
+
+
 def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
     """
     Single-pass wrap of all sync nodes in control_deps.
@@ -586,6 +660,7 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
     # Pre-pass: find inputs of waiting-stream nodes that need to be threaded
     # through wait_stream's control_deps for forward ordering.
     wait_stream_forward_deps = _collect_wait_stream_forward_deps(graph)
+    full_barrier_forward_deps = _collect_full_barrier_forward_deps(graph)
 
     stream_to_nodes: dict[int | None, list[Node]] = {}
     # Maps event_index -> control_deps node that wrapped its record_event,
@@ -597,6 +672,12 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
     # Maps event_index -> stream that the event was recorded on,
     # so synchronize_event can infer its stream.
     event_to_stream: dict[int, int | None] = {}
+    # Tracks the most recent control_deps node and its passthrough
+    # getitems per stream. synchronize_stream/device consults this to
+    # depend on prior sync ops (ctrl_node for ordering) and thread
+    # cross-stream data through (passthrough for data edges), even
+    # after stream_to_nodes has been cleared by those sync ops.
+    stream_sync_deps: dict[int | None, list[Node]] = {}
     visited: set[Node] = set()
     found_sync = False
 
@@ -616,13 +697,26 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                     torch.ops.streams.synchronize_device.default,
                     torch.ops.streams.synchronize_stream.default,
                 ):
-                    all_stream_deps: list[Node] = [
-                        n for nodes in stream_to_nodes.values() for n in nodes
-                    ]
+                    all_stream_deps = _collect_full_barrier_deps(
+                        stream_to_nodes, stream_sync_deps, bwd=is_bwd_node(node)
+                    )
+                    existing_ids = {id(dep) for dep in all_stream_deps}
+                    for dep in full_barrier_forward_deps.get(node, ()):
+                        if id(dep) not in existing_ids:
+                            all_stream_deps.append(dep)
+                            existing_ids.add(id(dep))
                     if all_stream_deps:
                         found_sync = True
-                        _wrap_sync_node(gm, node, all_stream_deps, visited)
+                        ctrl_node_sync, passthrough_sync = _wrap_sync_node(
+                            gm, node, all_stream_deps, visited
+                        )
+                    else:
+                        ctrl_node_sync = None
+                        passthrough_sync: list[Node] = []
                     stream_to_nodes.clear()
+                    stream_sync_deps.clear()
+                    if ctrl_node_sync is not None:
+                        stream_sync_deps[None] = [ctrl_node_sync, *passthrough_sync]
                     while (
                         getattr(next_node, "_erased", False) and next_node.op != "root"
                     ):
@@ -634,10 +728,24 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                 # the waited_on stream: all prior work there must complete
                 # before the waiting stream proceeds.
                 if node.target is torch.ops.streams.wait_stream.default:
+                    waiting_stream: int = node.args[0]  # type: ignore[assignment]
                     waited_on_stream: int = node.args[1]  # type: ignore[assignment]
                     deps_before_sync = list(stream_to_nodes.get(waited_on_stream, ()))
                     if None in stream_to_nodes and waited_on_stream is not None:
                         deps_before_sync.extend(stream_to_nodes[None])
+                    frontier_streams = dict.fromkeys(
+                        (waited_on_stream, waiting_stream, None)
+                    )
+                    prior_syncs = list(
+                        dict.fromkeys(
+                            dep
+                            for stream in frontier_streams
+                            for dep in stream_sync_deps.get(stream, ())
+                        )
+                    )
+                    if is_bwd_node(node):
+                        prior_syncs = [n for n in prior_syncs if is_bwd_node(n)]
+                    deps_before_sync.extend(prior_syncs)
                     # Also include inputs of subsequent waiting-stream nodes
                     # so they get threaded through control_deps, creating a
                     # forward ordering constraint (waiting-stream work must
@@ -649,7 +757,21 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                             existing_ids.add(id(dep))
                     if deps_before_sync:
                         found_sync = True
-                        _wrap_sync_node(gm, node, deps_before_sync, visited)
+                        ctrl_node_ws, passthrough_ws = _wrap_sync_node(
+                            gm, node, deps_before_sync, visited
+                        )
+                        # Key under the WAITING stream: the wait_stream op runs on
+                        # it, so a later record/wait on the waiting stream must
+                        # chain to this wait (otherwise a bare record there floats
+                        # above it). The waited_on stream gains no work from this op.
+                        stream_sync_deps[waiting_stream] = [
+                            ctrl_node_ws,
+                            *passthrough_ws,
+                        ]
+                        stream_sync_deps[waited_on_stream] = [
+                            ctrl_node_ws,
+                            *passthrough_ws,
+                        ]
                     stream_to_nodes[waited_on_stream] = []
                     if None in stream_to_nodes:
                         stream_to_nodes[None] = []
@@ -669,14 +791,16 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                 # that any post-sync uses depend on the synchronize.
                 if node.target is torch.ops.streams.synchronize_event.default:
                     sync_stream: int | None = event_to_stream.get(event_index)
-                    all_stream_deps: list[Node] = [
-                        n for nodes in stream_to_nodes.values() for n in nodes
+                    # Like synchronize_stream/device, this is a CPU-side barrier,
+                    # so fold in still-live cross-stream data accumulated by prior
+                    # sync ops (which cleared stream_to_nodes).
+                    all_stream_deps = _collect_full_barrier_deps(
+                        stream_to_nodes, stream_sync_deps, bwd=is_bwd_node(node)
+                    )
+                    deps_before_sync = [
+                        *all_stream_deps,
+                        *full_barrier_forward_deps.get(node, ()),
                     ]
-                    if event_index not in event_to_stream:
-                        placeholders = [n for n in graph.nodes if n.op == "placeholder"]
-                        deps_before_sync = [*placeholders, *all_stream_deps]
-                    else:
-                        deps_before_sync = all_stream_deps
                 else:
                     sync_stream = node.args[1]  # type: ignore[assignment]
                     deps_before_sync = list(stream_to_nodes.get(sync_stream, ()))
@@ -686,6 +810,23 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                     # implicitly on that stream.
                     if None in stream_to_nodes and sync_stream is not None:
                         deps_before_sync.extend(stream_to_nodes[None])
+                    # Order this sync op after the prior sync on its own stream
+                    # (and after any full barrier, keyed under None). Without this,
+                    # a record/wait whose stream_to_nodes was reset by an earlier
+                    # sync would have no deps, stay unwrapped, and float as a bare
+                    # side-effectful node -- capturing nothing, the same failure as
+                    # an unanchored synchronize_stream.
+                    prior_syncs = [
+                        *stream_sync_deps.get(sync_stream, ()),
+                        *stream_sync_deps.get(None, ()),
+                    ]
+                    # A backward sync must anchor only on backward sync nodes:
+                    # depending on a forward control_deps node crosses the fwd/bwd
+                    # boundary onto a node that is neither saveable nor
+                    # recomputable, which makes the min-cut partitioner infeasible.
+                    if is_bwd_node(node):
+                        prior_syncs = [n for n in prior_syncs if is_bwd_node(n)]
+                    deps_before_sync.extend(prior_syncs)
 
                 # For wait_event and synchronize_event, depend on the matching
                 # record_event's control_deps node (ordering) and thread its
@@ -706,8 +847,28 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                             *deps_before_sync,
                             *event_to_passthrough[event_index],
                         ]
+                elif (
+                    node.target is torch.ops.streams.record_event.default
+                    and event_index in event_to_ctrl
+                ):
+                    # Re-recording replaces an event's state, but the host-side
+                    # record operations must retain program order even when the
+                    # new record is on an otherwise-empty stream.
+                    deps_before_sync.insert(0, event_to_ctrl[event_index])
 
-                if deps_before_sync:
+                # Deduplicate (preserving order): the folded stream_sync_deps and
+                # the event's own event_to_ctrl/event_to_passthrough can overlap.
+                seen_deps: set[int] = set()
+                deps_before_sync = [
+                    d
+                    for d in deps_before_sync
+                    if id(d) not in seen_deps and not seen_deps.add(id(d))
+                ]
+
+                if (
+                    deps_before_sync
+                    or node.target is torch.ops.streams.record_event.default
+                ):
                     found_sync = True
                     ctrl_node, passthrough = _wrap_sync_node(
                         gm, node, deps_before_sync, visited
@@ -717,16 +878,27 @@ def wrap_all_sync_nodes_with_control_deps(gm: torch.fx.GraphModule) -> None:
                     passthrough: list[torch.fx.Node] = []
 
                 if node.target is torch.ops.streams.record_event.default:
+                    if ctrl_node is None:
+                        raise AssertionError("record_event must be wrapped")
                     event_to_stream[event_index] = sync_stream
-                    if ctrl_node is not None:
-                        event_to_ctrl[event_index] = ctrl_node
+                    event_to_ctrl[event_index] = ctrl_node
                     event_to_passthrough[event_index] = passthrough
+
+                if ctrl_node is not None:
+                    stream_sync_deps[sync_stream] = [ctrl_node, *passthrough]
 
                 # Reset: ops between this sync and the next will accumulate
                 # fresh. Ordering with prior ops is already enforced because
                 # their uses were rewired through getitems from control_deps.
+                # synchronize_event is a full barrier, so its own passthrough
+                # subsumes all prior per-stream data: clear then re-seed. Key the
+                # reseed under None (like synchronize_stream/device) so a later
+                # record/wait on any stream chains after it.
                 if node.target is torch.ops.streams.synchronize_event.default:
                     stream_to_nodes.clear()
+                    stream_sync_deps.clear()
+                    if ctrl_node is not None:
+                        stream_sync_deps[None] = [ctrl_node, *passthrough]
                 else:
                     stream_to_nodes[sync_stream] = []
                     if None in stream_to_nodes:
