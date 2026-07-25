@@ -4068,10 +4068,27 @@ Returns:
           .def(
               "get_error",
               &::c10d::nccl2::ProcessGroupNCCL::getError,
-              py::call_guard<py::gil_scoped_release>());
+              py::call_guard<py::gil_scoped_release>())
+          .def_property_readonly(
+              "options",
+              &::c10d::nccl2::ProcessGroupNCCL::getBackendOptions,
+              R"(Return the options used to create this ProcessGroupNCCL2 instance.)");
 
   intrusive_ptr_class_<::c10d::nccl2::ProcessGroupNCCL::Options>(
-      processGroupNCCL2, "Options", backendOptions)
+      processGroupNCCL2,
+      "Options",
+      backendOptions,
+      R"(
+ProcessGroup options for the nccl2 backend
+
+Example::
+    >>> import torch.distributed as dist
+    >>>
+    >>> nccl_options = dist.ProcessGroupNCCL2.Options(is_high_priority_stream=True)
+    >>> nccl_options.config.cga_cluster_size = 2
+    >>> nccl_options.config.max_ctas = 4
+    >>> dist.init_process_group("nccl2", pg_options=nccl_options)
+      )")
       .def(py::init<bool>(), py::arg("is_high_priority_stream") = false)
       .def_readwrite(
           "is_high_priority_stream",
@@ -4079,7 +4096,21 @@ Returns:
       .def_readwrite(
           "abort_process_on_timeout_or_error",
           &::c10d::nccl2::ProcessGroupNCCL::Options::
-              abort_process_on_timeout_or_error);
+              abort_process_on_timeout_or_error)
+      .def_readwrite(
+          "max_event_pool_size",
+          &::c10d::nccl2::ProcessGroupNCCL::Options::max_event_pool_size)
+      .def_property(
+          "config",
+          [](::c10d::nccl2::ProcessGroupNCCL::Options& self) -> ncclConfig_t& {
+            return self.config;
+          },
+          [](::c10d::nccl2::ProcessGroupNCCL::Options& self,
+             const ncclConfig_t& config) {
+            self.config = ::c10d::nccl2::cloneNcclConfig(config);
+          },
+          py::return_value_policy::reference_internal,
+          R"(NCCLConfig for the communicator, see ProcessGroupNCCL.Options.config.)");
 
   intrusive_ptr_no_gil_destructor_class_<::c10d::nccl2::ProcessGroupNCCLLazy>(
       module, "ProcessGroupNCCLLazy", backend)

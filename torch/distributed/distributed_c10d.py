@@ -665,19 +665,28 @@ def _create_nccl_process_group(
     return backend_class
 
 
+def _nccl2_options(backend_options: object | None) -> "ProcessGroupNCCL2.Options":
+    """
+    Resolve the options for an nccl2 backend: a ProcessGroupNCCL2.Options is
+    used as-is, a stock ProcessGroupNCCL.Options has its communicator config
+    carried over, anything else falls back to defaults.
+    """
+    if isinstance(backend_options, ProcessGroupNCCL2.Options):
+        return backend_options
+
+    pg_options = ProcessGroupNCCL2.Options()
+    if isinstance(backend_options, ProcessGroupNCCL.Options):
+        pg_options.is_high_priority_stream = backend_options.is_high_priority_stream
+        pg_options.config = backend_options.config
+    return pg_options
+
+
 def _create_nccl2_process_group(
     opts: _DistributedBackendOptions, backend_options: object | None
 ) -> C10DBackend:
     if not is_nccl_available():
         raise RuntimeError("Distributed package doesn't have NCCL built in")
-    # Accept a ProcessGroupNCCL2.Options if given; otherwise (None, or a
-    # ProcessGroupNCCL.Options passed through the generic path) build a fresh one.
-    if backend_options is not None and isinstance(
-        backend_options, ProcessGroupNCCL2.Options
-    ):
-        pg_options = backend_options
-    else:
-        pg_options = ProcessGroupNCCL2.Options()
+    pg_options = _nccl2_options(backend_options)
     # pyrefly: ignore [bad-argument-type]
     pg_options._timeout = opts.timeout
     pg_options.global_ranks_in_group = opts.global_ranks_in_group
@@ -692,12 +701,7 @@ def _create_nccl_lazy_process_group(
 ) -> C10DBackend:
     if not is_nccl_available():
         raise RuntimeError("Distributed package doesn't have NCCL built in")
-    if backend_options is not None and isinstance(
-        backend_options, ProcessGroupNCCL2.Options
-    ):
-        pg_options = backend_options
-    else:
-        pg_options = ProcessGroupNCCL2.Options()
+    pg_options = _nccl2_options(backend_options)
     # pyrefly: ignore [bad-argument-type]
     pg_options._timeout = opts.timeout
     pg_options.global_ranks_in_group = opts.global_ranks_in_group

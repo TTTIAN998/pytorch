@@ -47,6 +47,13 @@ namespace c10d::nccl2 {
 constexpr std::string_view kHintMaxEventPoolSize = "max_event_pool_size";
 constexpr size_t kDefaultMaxEventPoolSize = 1000;
 
+// ncclConfig_t::netName is a strdup'ed const char* (see the NCCLConfig pybind
+// setter) and ncclConfig_t tracks no ownership, so plainly copying the struct
+// would leave two owners sharing one allocation -- which double frees on the
+// NCCL versions that free the caller's netName when the communicator is
+// destroyed. Copy the string as well so each config owns its own.
+TORCH_API ncclConfig_t cloneNcclConfig(const ncclConfig_t& config);
+
 // Custom exception class for better error handling
 class NCCLException : public std::exception {
  public:
@@ -92,6 +99,11 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   struct TORCH_API Options : ::c10d::Backend::Options {
     bool abort_process_on_timeout_or_error{true};
     bool is_high_priority_stream{false};
+    // Communicator config, same type as ProcessGroupNCCL::Options::config.
+    ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
+    size_t max_event_pool_size{kDefaultMaxEventPoolSize};
+    // Stringly-typed config used by the torchcomms API. Applied on top of the
+    // typed members above, i.e. a hint wins over the equivalent config field.
     std::unordered_map<std::string, std::string> hints;
 
     explicit Options(bool is_high_priority_stream = false)

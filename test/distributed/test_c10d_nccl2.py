@@ -47,6 +47,88 @@ class ProcessGroupNCCL2Test(MultiProcContinuousTest):
         time.sleep(2)
         dist.barrier()
 
+    @requires_nccl()
+    @skip_if_lt_x_gpu(2)
+    def test_options_config_roundtrip(self) -> None:
+        opts = dist.ProcessGroupNCCL2.Options()
+        opts.config.cga_cluster_size = 2
+        opts.config.max_ctas = 4
+        opts.max_event_pool_size = 128
+        self.assertEqual(opts.config.cga_cluster_size, 2)
+        self.assertEqual(opts.config.max_ctas, 4)
+        self.assertEqual(opts.max_event_pool_size, 128)
+
+        # A stock NCCLConfig can be handed over wholesale.
+        stock = dist.ProcessGroupNCCL.Options()
+        stock.config.min_ctas = 3
+        stock.config.net_name = "Socket"
+        opts.config = stock.config
+        self.assertEqual(opts.config.min_ctas, 3)
+        self.assertEqual(opts.config.net_name, "Socket")
+
+
+class _ProcessGroupNCCL2OptionsTest(MultiProcContinuousTest):
+    """Base for groups initialized with backend specific options."""
+
+    @classmethod
+    def backend_str(cls) -> str:
+        return "nccl2"
+
+    @classmethod
+    def device_type(cls) -> str:
+        return "cuda"
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cuda", self.rank)
+
+    def setUp(self) -> None:
+        super().setUp()
+        torch.cuda.set_device(self.rank)
+
+    def _check_all_reduce(self) -> None:
+        t = torch.full((4,), float(self.rank), device=self.device)
+        dist.all_reduce(t)
+        expected = float(sum(range(self.world_size)))
+        self.assertEqual(t, torch.full((4,), expected, device=self.device))
+
+
+class ProcessGroupNCCL2ConfigTest(_ProcessGroupNCCL2OptionsTest):
+    @classmethod
+    def opts(cls, high_priority_stream=False):
+        opts = dist.ProcessGroupNCCL2.Options()
+        opts.config.cga_cluster_size = 2
+        opts.config.max_ctas = 4
+        opts.max_event_pool_size = 128
+        return opts
+
+    @requires_nccl()
+    @skip_if_lt_x_gpu(2)
+    def test_collective_with_config(self) -> None:
+        backend = dist.get_backend_impl(device=self.device)
+        self.assertEqual(backend.options.config.cga_cluster_size, 2)
+        self.assertEqual(backend.options.config.max_ctas, 4)
+        self.assertEqual(backend.options.max_event_pool_size, 128)
+        self._check_all_reduce()
+
+
+class ProcessGroupNCCL2StockOptionsTest(_ProcessGroupNCCL2OptionsTest):
+    @classmethod
+    def opts(cls, high_priority_stream=False):
+        opts = dist.ProcessGroupNCCL.Options(is_high_priority_stream=True)
+        opts.config.cga_cluster_size = 2
+        opts.config.max_ctas = 4
+        return opts
+
+    @requires_nccl()
+    @skip_if_lt_x_gpu(2)
+    def test_stock_nccl_options_honored(self) -> None:
+        backend = dist.get_backend_impl(device=self.device)
+        self.assertEqual(backend.options.config.cga_cluster_size, 2)
+        self.assertEqual(backend.options.config.max_ctas, 4)
+        self.assertTrue(backend.options.is_high_priority_stream)
+        self._check_all_reduce()
+
 
 class ProcessGroupNCCL2ExpandableSegmentsTest(MultiProcContinuousTest):
     @classmethod

@@ -1127,8 +1127,10 @@ class ProcessGroupXCCL(Backend):
 
 class ProcessGroupNCCL2(Backend):
     class Options(Backend.Options):
+        config: ProcessGroupNCCL.NCCLConfig
         is_high_priority_stream: bool
         abort_process_on_timeout_or_error: bool
+        max_event_pool_size: int
 
         def __init__(self, is_high_priority_stream: bool = False): ...
 
@@ -1140,6 +1142,8 @@ class ProcessGroupNCCL2(Backend):
         options: Options,
     ) -> None: ...
     def get_error(self) -> ErrorType: ...
+    @property
+    def options(self) -> Options: ...
 
 class ProcessGroupNCCLLazy(Backend):
     def __init__(
