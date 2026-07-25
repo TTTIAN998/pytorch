@@ -296,6 +296,98 @@ def _(
     )
 
 
+def nvfp4_e2m1_codes(input: torch.Tensor) -> torch.Tensor:
+    """Encode Float32 values as unpacked E2M1 bit patterns."""
+    input_bits = input.view(torch.int32)
+    sign = input_bits & 0x80000000
+    magnitude = (input_bits ^ sign).view(torch.float32)
+    saturated = magnitude >= 6.0
+    denormal = (~saturated) & (magnitude < 1.0)
+    normal = ~(saturated | denormal)
+    denormal_code = ((magnitude + 4194304.0).view(torch.int32) - 1249902592).to(
+        torch.uint8
+    )
+    normal_bits = magnitude.view(torch.int32)
+    mantissa_odd = (normal_bits >> 22) & 1
+    normal_code = ((normal_bits - 1054867457 + mantissa_odd) >> 22).to(torch.uint8)
+    code = torch.full_like(magnitude, 7, dtype=torch.uint8)
+    code = torch.where(denormal, denormal_code, code)
+    code = torch.where(normal, normal_code, code)
+    return code | (((sign >> 28).to(torch.uint8)) & 8)
+
+
+def validate_nvfp4_pack_input(input: torch.Tensor) -> None:
+    """Require paired Float32 values along the innermost dimension."""
+    if input.dtype is not torch.float32 or input.ndim == 0 or input.shape[-1] != 2:
+        raise ValueError(
+            "nvfp4_pack input must be Float32 with innermost dimension 2, "
+            f"got dtype={input.dtype}, shape={tuple(input.shape)}"
+        )
+
+
+@torch.library.custom_op("flex_gemm::nvfp4_pack", mutates_args=())
+def nvfp4_pack(input: torch.Tensor) -> torch.Tensor:
+    """Quantize adjacent normalized values into packed E2M1 storage.
+
+    Args:
+        input: Float32 values with an innermost pair dimension. Values are
+            rounded to nearest E2M1 and saturated to its finite range.
+
+    Returns:
+        Contiguous Uint8 storage with the innermost pair dimension removed.
+    """
+    validate_nvfp4_pack_input(input)
+    codes = nvfp4_e2m1_codes(input)
+    return (codes[..., 1] << 4) | codes[..., 0]
+
+
+@nvfp4_pack.register_fake
+def _(input: torch.Tensor) -> torch.Tensor:
+    validate_nvfp4_pack_input(input)
+    return torch.empty(tuple(input.shape[:-1]), device=input.device, dtype=torch.uint8)
+
+
+@torch.library.custom_op("flex_gemm::to_blocked", mutates_args=())
+def to_blocked(input_matrix: torch.Tensor) -> torch.Tensor:
+    """Rearrange a scale matrix into the cuBLAS 128x4 blocked format.
+
+    Args:
+        input_matrix: Two-dimensional matrix of block-scaling factors.
+
+    Returns:
+        Flattened blocked storage, including zero-filled padding tiles.
+    """
+    if input_matrix.ndim != 2:
+        raise ValueError(f"to_blocked expects a 2-D tensor, got {input_matrix.ndim}-D")
+    rows, cols = input_matrix.shape
+    row_blocks = (rows + 127) // 128
+    col_blocks = (cols + 3) // 4
+    padded_rows = row_blocks * 128
+    padded_cols = col_blocks * 4
+    padded = input_matrix
+    if (rows, cols) != (padded_rows, padded_cols):
+        padded = torch.zeros(
+            (padded_rows, padded_cols),
+            device=input_matrix.device,
+            dtype=input_matrix.dtype,
+        )
+        padded[:rows, :cols] = input_matrix
+    blocks = padded.reshape(row_blocks, 128, col_blocks, 4).permute(0, 2, 1, 3)
+    return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1)
+
+
+@to_blocked.register_fake
+def _(input_matrix: torch.Tensor) -> torch.Tensor:
+    if input_matrix.ndim != 2:
+        raise ValueError(f"to_blocked expects a 2-D tensor, got {input_matrix.ndim}-D")
+    rows, cols = input_matrix.shape
+    return torch.empty(
+        512 * ((rows + 127) // 128) * ((cols + 3) // 4),
+        device=input_matrix.device,
+        dtype=input_matrix.dtype,
+    )
+
+
 def apply_flex_gemm_body_graph_passes(
     body_graph: torch.fx.GraphModule, gemm_op: torch._ops.OpOverload
 ) -> None:
