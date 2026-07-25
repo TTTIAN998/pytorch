@@ -144,6 +144,25 @@ class VendoredDenseBlockScaledGemmKernel(CuteDslOperator):
                 scope = {}
                 exec(epilogue_op, {}, scope)
                 epilogue_op = scope[fn_name]
+        local_reduce_out = getattr(args, "local_reduce_out", None)
+        if local_reduce_out is not None:
+            return self.cute_compile(
+                self.impl,
+                args.A.tensor,
+                args.B.tensor,
+                args.A.scale.tensor,
+                args.B.scale.tensor,
+                args.out.tensor,
+                max_active_clusters,
+                stream,
+                epilogue_op,
+                alpha,
+                local_reduce_out.compile_time_tensor,
+                getattr(args, "local_reduce_group"),
+                getattr(args, "local_reduce_axis"),
+                getattr(args, "local_reduce_type"),
+                target_sm=target_sm,
+            )
         return self.cute_compile(
             self.impl,
             args.A.tensor,
@@ -179,6 +198,21 @@ class VendoredDenseBlockScaledGemmKernel(CuteDslOperator):
         if alpha is None:
             alpha = _ones_alpha()
 
+        local_reduce_out = getattr(args, "local_reduce_out", None)
+        if local_reduce_out is not None:
+            self.cute_run(  # pyrefly: ignore[missing-attribute]
+                compiled_gemm,
+                args.A.tensor,
+                args.B.tensor,
+                args.A.scale.tensor,
+                args.B.scale.tensor,
+                args.out.tensor,
+                stream,
+                alpha,
+                local_reduce_out.runtime_tensor,
+            )
+            return
+
         self.cute_run(  # pyrefly: ignore[missing-attribute]
             compiled_gemm,
             args.A.tensor,
@@ -188,6 +222,7 @@ class VendoredDenseBlockScaledGemmKernel(CuteDslOperator):
             args.out.tensor,
             stream,
             alpha,
+            None,
         )
 
     def _supports(
@@ -198,6 +233,36 @@ class VendoredDenseBlockScaledGemmKernel(CuteDslOperator):
         # rather than re-inferring the layout (the old _infer_scale_swizzle_impl
         # check wrongly rejected valid NVFP4 args on the transposed B operand).
         from cutlass.operators.arguments import ScaledOperand
+
+        local_reduce_out = getattr(args, "local_reduce_out", None)
+        if local_reduce_out is not None:
+            group = getattr(args, "local_reduce_group")
+            axis = getattr(args, "local_reduce_axis")
+            m, n = args.out.shape[-2:]
+            selected_size = n if axis == 1 else m
+            max_group = 32 if axis == 1 else 4
+            if (
+                axis not in (0, 1)
+                or group <= 1
+                or group > max_group
+                or selected_size % group != 0
+            ):
+                return Status.fail(
+                    "Grouped reduction requires a supported M- or N-axis group "
+                    "that divides the selected dimension."
+                )
+            expected_shape = (m, n // group) if axis == 1 else (m // group, n)
+            if local_reduce_out.shape != expected_shape:
+                return Status.fail(
+                    "Grouped reduction output shape must be "
+                    f"{expected_shape}; got {local_reduce_out.shape}."
+                )
+            if local_reduce_out.dtype is not cutlass.Float32 or tuple(
+                local_reduce_out.stride
+            ) != (expected_shape[1], 1):
+                return Status.fail(
+                    "Grouped reduction output must be contiguous Float32."
+                )
 
         m, n = args.out.shape[-2:]
         k = args.A.shape[-1]
