@@ -2462,6 +2462,16 @@
       ]
     }
   ],
+  "GB8816": [
+    {
+      "Gb_type": "Unresolved attribute access",
+      "Context": "generic_getattr: {type(obj).__name__}.{name}",
+      "Explanation": "Dynamo cannot resolve attribute '{name}' on {type(obj).__name__}.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB5904": [
     {
       "Gb_type": "unsupported __getitem__ (sq_item)",
@@ -2911,6 +2921,16 @@
       "Hints": [
         "Supported args are Tensors, and functions/nn.Modules/user-defined objects ",
         "from outside the compiled region.",
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
+  "GB8042": [
+    {
+      "Gb_type": "Attribute access on torch.profiler object",
+      "Context": "getattr({self}, {name})",
+      "Explanation": "Dynamo ignores torch.profiler side effects, so runtime attributes like `{name}` on a profiler object cannot be traced.",
+      "Hints": [
         "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
       ]
     }
