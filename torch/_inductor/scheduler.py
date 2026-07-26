@@ -4158,6 +4158,13 @@ class _LoopMutationTracker:
         self.state.restore()
 
 
+def _uncoalesced_memory_score(node: BaseSchedulerNode) -> int:
+    coalesce_analysis = node.get_coalesce_analysis()
+    if coalesce_analysis is None:
+        return 0
+    return sum(coalesce_analysis.uncoalesced_addrs.values())
+
+
 class Scheduler:
     """
     A Scheduler is a graph of BaseSchedulerNodes. It is responsible for
@@ -7492,6 +7499,7 @@ class Scheduler:
         # failed reindex attempt returns -1 and the caller may keep evaluating
         # fusion within the same can_fuse() call.
         rollback_snapshot = _LoopStateSnapshot.create((pw_node,))
+        uncoalesced_before = sum(_uncoalesced_memory_score(sn) for sn in snodes)
 
         for sn in snodes:
             sn.apply_loop_reindexing([red_numel, red_rnumel])
@@ -7511,6 +7519,13 @@ class Scheduler:
             for name in common_names
         )
         if not has_benefit:
+            rollback_snapshot.restore()
+            return False
+
+        uncoalesced_added = (
+            sum(_uncoalesced_memory_score(sn) for sn in snodes) - uncoalesced_before
+        )
+        if uncoalesced_added > self.score_fusion_memory(node1, node2):
             rollback_snapshot.restore()
             return False
 
