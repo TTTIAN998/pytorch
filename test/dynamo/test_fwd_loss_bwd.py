@@ -1400,6 +1400,18 @@ backward() with non-leaf tensor
         self.assertEqual(compiled_y, eager_y)
         self.assertEqual(compiled_grad, eager_grad)
 
+    def test_autograd_grad_with_requires_grad_setattr(self):
+        mod = torch.nn.Linear(4, 4)
+
+        def fn(x):
+            y = x.detach()
+            y.requires_grad = True
+            return torch.autograd.grad(mod(y).sum(), y)[0].detach()
+
+        x = torch.randn(2, 4)
+        compiled_fn = torch.compile(fn, backend="aot_eager", fullgraph=True)
+        self.assertEqual(compiled_fn(x), fn(x))
+
 
 if __name__ == "__main__":
     run_tests()
