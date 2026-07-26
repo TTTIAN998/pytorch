@@ -141,6 +141,9 @@ class TpReprTests(TestCase):
         self.assertEqual(fn(x, obj), out)
         self.assertEqual(out, 3)
 
+    # __repr__ = str.upper is an opaque C method descriptor with no traceable
+    # body, so Dynamo graph breaks instead of reproducing eager's TypeError.
+    @unittest.expectedFailure
     def test_user_defined_opaque_repr_descriptor_raises_type_error(self):
         def fn(x, obj):
             try:

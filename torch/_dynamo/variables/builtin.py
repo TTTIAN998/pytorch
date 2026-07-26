@@ -76,7 +76,6 @@ from ..utils import (
     numpy_operator_wrapper,
     proxy_args_kwargs,
     raise_args_mismatch,
-    specialize_symnode,
     str_methods,
     tensortype_to_dtype,
     unpack_iterable,
@@ -124,6 +123,7 @@ from .object_protocol import (
     maybe_get_python_type,
     pycallable_check,
     pyiter_check,
+    pynumber_index,
     pysequence_check,
     python_constant_richcompare_impl,
     ternary_iop,
@@ -2057,8 +2057,7 @@ class BuiltinVariable(BaseBuiltinVariable):
     ) -> VariableTracker:
         # Specialize SymNodeVariable to a constant first, matching CPython's
         # PyNumber_Index which forces a concrete int.
-        arg = specialize_symnode(arg)
-        return arg.nb_index_impl(tx)
+        return pynumber_index(tx, arg)
 
     def call_round(
         self,
@@ -2087,7 +2086,7 @@ class BuiltinVariable(BaseBuiltinVariable):
             raise_type_error(tx, "range expected at least 1 argument, got 0")
         if len(args) > 3:
             raise_type_error(tx, f"range expected at most 3 arguments, got {len(args)}")
-        args = tuple(VariableTracker.build(tx, arg.nb_index_impl(tx)) for arg in args)
+        args = tuple(pynumber_index(tx, arg) for arg in args)
         return variables.RangeVariable(list(args))
 
     def _dynamic_args(self, *args: VariableTracker, **kwargs: VariableTracker) -> bool:
