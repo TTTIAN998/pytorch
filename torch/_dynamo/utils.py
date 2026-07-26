@@ -2468,18 +2468,27 @@ def chromium_event_timed(
             chromium_event_log._reset_to_state(*reset_state)
 
 
+_cleanup_sentinel = object()
+
+
 @dataclasses.dataclass
 class CleanupHook:
     """Remove a global variable when hook is called"""
 
     scope: dict[str, Any]
     name: str
+    val: Any = dataclasses.field(compare=False, repr=False)
 
     def __call__(self, *args: Any) -> None:
         # Make sure we're not shutting down
         if CleanupManager is not None:
             CleanupManager.count -= 1
-        del self.scope[self.name]
+        # Hooks fire when the owning code object is collected, which can happen
+        # after something else rebound the name -- CompilePackage.install()
+        # reinstalls precompiled backends under the same generated names. Only
+        # remove the binding this hook installed.
+        if self.scope.get(self.name, _cleanup_sentinel) is self.val:
+            del self.scope[self.name]
 
     @staticmethod
     def create(scope: dict[str, Any], name: str, val: Any) -> CleanupHook:
@@ -2487,7 +2496,7 @@ class CleanupHook:
             raise AssertionError(f"Name {name!r} already exists in scope")
         CleanupManager.count += 1
         scope[name] = val
-        return CleanupHook(scope, name)
+        return CleanupHook(scope, name, val)
 
 
 class CleanupManager(ExactWeakKeyDictionary):
