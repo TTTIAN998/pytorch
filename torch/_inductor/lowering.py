@@ -1499,7 +1499,9 @@ def repeat(x, repeats):
 @register_lowering(aten.view, type_promotion_kind=None)
 @register_lowering(aten.reshape, type_promotion_kind=None)
 def view(x: TensorBox, sizes: Sequence[sympy.Expr]) -> TensorBox:
-    return TensorBox(View.create(x.data, sizes))
+    # .data unwraps a box, but on a view node it would drop the view itself
+    data = x.data if isinstance(x, TensorBox) else x
+    return TensorBox(View.create(data, sizes))
 
 
 @register_lowering(aten.permute, type_promotion_kind=None)
