@@ -1257,10 +1257,13 @@ def aot_module_simplified(
             )
     if compiled_fn is None:
         raise AssertionError("compiled_fn must not be None")
-    if isinstance(mod, torch._dynamo.utils.GmWrapper):
-        # This function is called by the flatten_graph_inputs wrapper, which boxes
-        # the inputs so that they can be freed before the end of this scope.
-        # For overhead reasons, this is not the default wrapper, see comment:
+    dynamo_boxed_call = isinstance(mod, torch.fx.GraphModule) and mod.meta.get(
+        "dynamo_use_boxed_call", False
+    )
+    if isinstance(mod, torch._dynamo.utils.GmWrapper) or dynamo_boxed_call:
+        # flatten_graph_inputs and selected Dynamo resume graphs box their inputs
+        # so references can be released before the end of this scope. For overhead
+        # reasons, this is not the default wrapper, see comment:
         # https://github.com/pytorch/pytorch/pull/122535/files#r1560096481
         @simple_wraps(compiled_fn)
         def forward(runtime_args: list[Any]) -> Any:

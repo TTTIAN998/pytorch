@@ -73,7 +73,10 @@ from torch._library.opaque_object import is_custom_class
 from torch._subclasses.fake_tensor import FakeTensor
 from torch._utils_internal import signpost_event
 from torch.export.dynamic_shapes import _ConstraintTarget
-from torch.fx._lazy_graph_module import _make_graph_module  # type: ignore[attr-defined]
+from torch.fx._lazy_graph_module import (  # type: ignore[attr-defined]
+    _LazyGraphModule,
+    _make_graph_module,
+)
 from torch.fx.experimental._backward_state import BackwardState
 from torch.fx.experimental.symbolic_shapes import (
     free_symbols,
@@ -135,6 +138,7 @@ from .source import (
     GlobalStateSource,
     is_constant_source,
     is_from_local_source,
+    ListGetItemSource,
     LocalSource,
     NumpyTensorSource,
     ParamBufferSource,
@@ -160,6 +164,8 @@ from .utils import (
     get_unique_name_wrt,
     graph_break_reasons,
     increment_op_count,
+    is_numpy_ndarray,
+    istensor,
     istype,
     lazy_format_graph_code,
     LazyString,
@@ -367,6 +373,52 @@ class FakeRootModule(torch.nn.Module):
             setattr(self, k, v)
 
 
+def _uses_boxed_call(fn: Callable[..., Any]) -> bool:
+    bound_self = getattr(fn, "__self__", None)
+    if (
+        isinstance(bound_self, fx.GraphModule)
+        and getattr(fn, "__name__", None) == "forward"
+    ):
+        return getattr(bound_self, "_boxed_call", False)
+
+    # Backends can wrap their result in Dynamo disable. Inspect through only
+    # genuine disable wrappers so an unboxed AOT forward cannot inherit the
+    # convention from a deeper boxed runtime wrapper.
+    call_contract_fn = fn
+    while getattr(call_contract_fn, "_torchdynamo_disable", False) and getattr(
+        call_contract_fn, "_torchdynamo_wrapper_id", None
+    ) == id(call_contract_fn):
+        call_contract_fn = cast(Any, call_contract_fn)._torchdynamo_orig_callable
+    call_contract_code = getattr(call_contract_fn, "__code__", None)
+    return bool(
+        getattr(call_contract_fn, "_boxed_call", False)
+        and call_contract_code is not None
+        and call_contract_code.co_argcount == 1
+        and not (call_contract_code.co_flags & inspect.CO_VARARGS)
+    )
+
+
+def _as_boxed_call(fn: Callable[..., Any]) -> Callable[..., Any] | None:
+    if _uses_boxed_call(fn):
+        return fn
+
+    bound_self = getattr(fn, "__self__", None)
+    if (
+        isinstance(bound_self, _LazyGraphModule)
+        and getattr(fn, "__name__", None) == "_lazy_forward"
+    ):
+        _LazyGraphModule.force_recompile(bound_self)
+        fn = bound_self.forward
+    if (
+        isinstance(bound_self, fx.GraphModule)
+        and getattr(fn, "__name__", None) == "forward"
+    ):
+        bound_self.graph.set_codegen(torch.fx.graph._BoxedCodeGen())
+        bound_self.recompile()
+        return bound_self.forward
+    return None
+
+
 class WrapperBackend:
     def __init__(self, backend: CompilerFn) -> None:
         self.backend: CompilerFn = backend
@@ -388,7 +440,12 @@ class WrapperBackend:
         # if verify_correctness=True
         try:
             correct = self.gm.forward(*clone_inputs(example_inputs))
-            result = self.candidate(*clone_inputs(example_inputs))
+            candidate_inputs = clone_inputs(example_inputs)
+            if _uses_boxed_call(self.candidate):
+                # pyrefly: ignore [bad-argument-type]
+                result = self.candidate(candidate_inputs)
+            else:
+                result = self.candidate(*candidate_inputs)
 
             # TODO: replace `same` function with the one in testing
             if same(correct, result):
@@ -2041,9 +2098,12 @@ class OutputGraph(OutputGraphCommon):
                         "variable should never be NULL in Python < 3.12"
                     )
             meta.locals_names[k] = len(meta.locals_names)
-            if isinstance(v, ContextWrappingVariable):
+            # Avoid realizing lazy locals here; resume metadata only needs to
+            # handle context variables that Dynamo already materialized.
+            if type.__instancecheck__(ContextWrappingVariable, v):
+                ctx_v = cast(ContextWrappingVariable, v)
                 target_values = (
-                    () if v.target_values is None else tuple(v.target_values)
+                    () if ctx_v.target_values is None else tuple(ctx_v.target_values)
                 )
                 meta.locals_ctx_args.append((k, target_values))
             stack_values.append(v)
@@ -2218,23 +2278,36 @@ class OutputGraph(OutputGraphCommon):
         stored_graph_output_var = False
         graph_output_var = None
 
+        def can_use_tensor_stack_fast_path(v: VariableTracker) -> bool:
+            if isinstance(v, variables.LazyVariableTracker):
+                if v.is_realized():
+                    v = v.unwrap()
+                elif is_numpy_ndarray(v.original_value()):
+                    return False
+                elif v.is_tensor():
+                    v = v.unwrap()
+                else:
+                    return False
+
+            if not v.is_tensor():
+                return False
+
+            return not any(
+                type.__instancecheck__(cls, v)
+                for cls in (
+                    UnspecializedPythonVariable,
+                    NumpyNdarrayVariable,
+                    TensorWithTFOverrideVariable,
+                )
+            ) and not (
+                type.__instancecheck__(SymNodeVariable, v) and v.python_type() is float
+            )
+
         # call compiled fx graph and codegen all values - stack and locals
         can_use_fast_path = (
             self.root_tx is tx  # single frame
             and stack_values_flat
-            and all(
-                not isinstance(
-                    v,
-                    (
-                        UnspecializedPythonVariable,
-                        NumpyNdarrayVariable,
-                        TensorWithTFOverrideVariable,
-                    ),
-                )
-                and not (isinstance(v, SymNodeVariable) and v.python_type() is float)
-                for v in stack_values_flat
-            )
-            and all(x.is_tensor() for x in stack_values_flat)
+            and all(can_use_tensor_stack_fast_path(v) for v in stack_values_flat)
             and len(set(stack_values_flat)) == len(stack_values_flat)
             and self.side_effects.is_empty()
             and not tx.debug_locals
@@ -2376,8 +2449,47 @@ class OutputGraph(OutputGraphCommon):
             output = []
             subgraph_pycode = None
             if count_calls(self.graph) != 0 or len(pass2.graph_outputs) != 0:
+                live_local_names = (
+                    self._live_local_names(pass2) | self._resume_live_local_names()
+                )
+                graph_input_names_to_delete = self._dead_tensor_graph_input_names(
+                    live_local_names
+                )
+                resume_args_varname = tx._boxed_resume_arg_name()
+                resume_arg_indexes_to_clear: set[int] = set()
+                if (
+                    resume_args_varname is not None
+                    and resume_args_varname in tx.cleared_fast_locals
+                ):
+                    resume_args = tx.f_locals.get(resume_args_varname)
+                    if isinstance(resume_args, list):
+                        live_resume_arg_indexes = self._live_resume_arg_indexes(
+                            pass2, resume_args_varname, len(resume_args)
+                        )
+                        resume_arg_indexes_to_clear = {
+                            idx
+                            for idx, value in enumerate(resume_args)
+                            if idx not in live_resume_arg_indexes and istensor(value)
+                        }
+                if (
+                    resume_args_varname is not None
+                    and resume_args_varname in live_local_names
+                ):
+                    graph_input_names_to_delete.discard(resume_args_varname)
+                graph_input_names_to_clear = tx.cleared_fast_locals - live_local_names
+                use_boxed_graph_call = resume_args_varname is not None and bool(
+                    graph_input_names_to_delete
+                    or graph_input_names_to_clear
+                    or resume_arg_indexes_to_clear
+                )
                 instructions, subgraph_pycode = self.compile_and_call_fx_graph(
-                    tx, pass2.graph_output_vars(), root
+                    tx,
+                    pass2.graph_output_vars(),
+                    root,
+                    graph_input_names_to_delete,
+                    graph_input_names_to_clear,
+                    resume_arg_indexes_to_clear,
+                    use_boxed_graph_call,
                 )
                 output.extend(instructions)
 
@@ -2592,6 +2704,74 @@ class OutputGraph(OutputGraphCommon):
 
         cg.restore_stack(stack_values, value_from_source=not tx.export)
         self.side_effects.codegen_update_mutated(cg, log_side_effects)
+
+    @staticmethod
+    def _base_local_name(source: Source | None) -> str | None:
+        while source is not None:
+            if isinstance(source, LocalSource):
+                return source.local_name
+            source = getattr(source, "base", None)
+        return None
+
+    def _live_local_names(self, cg: PyCodegen) -> set[str]:
+        live_local_names: set[str] = set(self.code_options["co_cellvars"])
+        live_local_names.update(self.code_options["co_freevars"])
+        for value in cg.uses:
+            source = (
+                value if isinstance(value, Source) else getattr(value, "source", None)
+            )
+            local_name = self._base_local_name(source)
+            if local_name is not None:
+                live_local_names.add(local_name)
+        return live_local_names
+
+    def _live_resume_arg_indexes(
+        self, cg: PyCodegen, resume_args_varname: str, resume_args_len: int
+    ) -> set[int]:
+        live_indexes: set[int] = set()
+        for value in cg.uses:
+            source = (
+                value if isinstance(value, Source) else getattr(value, "source", None)
+            )
+            while source is not None:
+                if (
+                    isinstance(source, (GetItemSource, ListGetItemSource))
+                    and isinstance(source.base, LocalSource)
+                    and source.base.local_name == resume_args_varname
+                    and isinstance(source.index, int)
+                ):
+                    live_indexes.add(source.index)
+                    break
+                if (
+                    isinstance(source, LocalSource)
+                    and source.local_name == resume_args_varname
+                ):
+                    return set(range(resume_args_len))
+                source = getattr(source, "base", None)
+        return live_indexes
+
+    def _resume_live_local_names(self) -> set[str]:
+        if not self.compile_subgraph_reason.graph_break:
+            return set()
+
+        return {
+            name
+            for name, value in self.root_tx.symbolic_locals.items()
+            if isinstance(value.source, LocalSource) and value.source.local_name == name
+        }
+
+    def _dead_tensor_graph_input_names(self, live_local_names: set[str]) -> set[str]:
+        names: set[str] = set()
+        for arg in self.graphargs:
+            if (
+                arg.is_tensor
+                and not arg.pass_arg_as_tensor
+                and isinstance(arg.source, LocalSource)
+                and arg.source.local_name not in live_local_names
+                and arg.source.local_name in self.code_options["co_varnames"]
+            ):
+                names.add(arg.source.local_name)
+        return names
 
     def cleanup_graph(self) -> None:
         """
@@ -2854,6 +3034,10 @@ class OutputGraph(OutputGraphCommon):
         tx: "InstructionTranslatorBase",
         rv: list[VariableTracker],
         root: FakeRootModule,
+        graph_input_names_to_delete: set[str] | None = None,
+        graph_input_names_to_clear: set[str] | None = None,
+        resume_arg_indexes_to_clear: set[int] | None = None,
+        use_boxed_graph_call: bool = False,
     ) -> tuple[list[Instruction], list[str] | None]:
         """
         Generate code from self.graph and return the Instruction()s to
@@ -2987,6 +3171,7 @@ class OutputGraph(OutputGraphCommon):
             )
             gm.meta["dynamo_compile_id"] = self.dynamo_compile_id
             gm.meta["backend_id"] = name
+            gm.meta["dynamo_use_boxed_call"] = use_boxed_graph_call
 
             if self.cudagraph_annotation is not None:
                 gm.meta["cudagraph_annotation"] = self.cudagraph_annotation
@@ -3080,8 +3265,12 @@ class OutputGraph(OutputGraphCommon):
                 # tracing constants no longer need to keep real tensors alive.
                 old_fake_mode.fake_tensor_converter.clear_non_cpu_constants()
 
-            if self.package is not None:
-                self.package.add_backend_id(name, compiled_fn)
+            boxed_call = _uses_boxed_call(compiled_fn)
+            if use_boxed_graph_call and not boxed_call:
+                boxed_compiled_fn = _as_boxed_call(compiled_fn)
+                if boxed_compiled_fn is not None:
+                    compiled_fn = boxed_compiled_fn
+                    boxed_call = True
 
             # If __torch_function__ subclass dispatch was inlined during
             # tracing, wrap the compiled graph to disable __torch_function__
@@ -3090,12 +3279,22 @@ class OutputGraph(OutputGraphCommon):
             # inputs that the graph already handles).
             if self.torch_function_subclass_inlined:
                 real_compiled_fn = compiled_fn
+                if boxed_call:
 
-                def _tf_disabled_wrapper(*args, **kwargs):
-                    with torch._C.DisableTorchFunctionSubclass():
-                        return real_compiled_fn(*args, **kwargs)
+                    def _tf_disabled_wrapper(args):
+                        with torch._C.DisableTorchFunctionSubclass():
+                            return real_compiled_fn(args)
+
+                else:
+
+                    def _tf_disabled_wrapper(*args, **kwargs):
+                        with torch._C.DisableTorchFunctionSubclass():
+                            return real_compiled_fn(*args, **kwargs)
 
                 compiled_fn = _tf_disabled_wrapper
+
+            if self.package is not None:
+                self.package.add_backend_id(name, compiled_fn)
 
             compiled_fn = disable(
                 compiled_fn, reason="do not trace Dynamo-compiled graph"
@@ -3104,10 +3303,17 @@ class OutputGraph(OutputGraphCommon):
             counters["stats"]["unique_graphs"] += 1
             if old_fake_mode.shape_env is None:
                 raise AssertionError("old_fake_mode.shape_env must not be None")
-            if specializations := old_fake_mode.shape_env.specializations:
+            sources = [a.source for a in self.graphargs]
+            # ShapeEnv spans graph breaks, so it can contain specializations for
+            # inputs that were pruned from this particular graph.
+            specializations = [
+                specialization
+                for specialization in old_fake_mode.shape_env.specializations
+                if specialization.source in sources
+            ]
+            if specializations:
                 specialization_guards = []
                 specialization_cache: dict[Specialization, Callable[[Any], Any]] = {}
-                sources = [a.source for a in self.graphargs]
                 for specialization in specializations:
                     source_index = sources.index(specialization.source)
                     check_fn_source = inspect.getsource(specialization.check_fn).strip()
@@ -3139,11 +3345,15 @@ class OutputGraph(OutputGraphCommon):
 
                 @torch._dynamo.disable(reason="do not trace Dynamo-compiled graph")  # type: ignore[misc]
                 def specialized_dispatch(*args: Any, **kwargs: Any) -> Any:
+                    runtime_args = args[0] if boxed_call else args
                     for check_fn, specialization in specialization_guards:
-                        if check_fn(args):
+                        if check_fn(runtime_args):
                             if specialization in specialization_cache:
-                                return specialization_cache[specialization](
-                                    *args, **kwargs
+                                specialized_fn = specialization_cache[specialization]
+                                return (
+                                    specialized_fn(runtime_args)
+                                    if boxed_call
+                                    else specialized_fn(*args, **kwargs)
                                 )
 
                             with self.shape_env.patch_source_specialization(
@@ -3151,14 +3361,35 @@ class OutputGraph(OutputGraphCommon):
                             ):
                                 # Modify gm so AOTAutogradCache key changes per specialization
                                 gm.meta["specialization"] = specialization
-                                example_inputs: list[Tensor] = list(args)
+                                example_inputs: list[Tensor] = list(runtime_args)
                                 with tracing(self.tracing_context):
                                     specialization_cache[specialization] = (
                                         self.call_user_compiler(gm, example_inputs)
                                     )
+                                del example_inputs
+                                if boxed_call:
+                                    boxed_specialized_fn = _as_boxed_call(
+                                        specialization_cache[specialization]
+                                    )
+                                    if boxed_specialized_fn is None:
+                                        raise AssertionError(
+                                            "specialized backend did not preserve boxed call"
+                                        )
+                                    specialization_cache[specialization] = (
+                                        boxed_specialized_fn
+                                    )
 
-                            return specialization_cache[specialization](*args, **kwargs)
-                    return compiled_fn(*args, **kwargs)
+                            specialized_fn = specialization_cache[specialization]
+                            return (
+                                specialized_fn(runtime_args)
+                                if boxed_call
+                                else specialized_fn(*args, **kwargs)
+                            )
+                    return (
+                        compiled_fn(runtime_args)
+                        if boxed_call
+                        else compiled_fn(*args, **kwargs)
+                    )
 
                 # This is safe because we pre-process name to be unique
                 self.install_global_unsafe(name, specialized_dispatch)
@@ -3202,7 +3433,13 @@ class OutputGraph(OutputGraphCommon):
             for idx, arg in enumerate(self.graphargs):
                 self.export_metadata.graph_input_idx_to_local_source[idx] = arg.source
 
-            cg.make_call_generated_code(name)
+            cg.make_call_generated_code(
+                name,
+                graph_input_names_to_delete,
+                graph_input_names_to_clear,
+                resume_arg_indexes_to_clear,
+                boxed_call,
+            )
 
             return cg.get_instructions(), cg.get_pycode()
 
