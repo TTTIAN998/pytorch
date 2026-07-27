@@ -6163,6 +6163,16 @@ class Scheduler:
         "Look up the node in Scheduler name_to_fused_node"
         return self.name_to_fused_node[node.get_first_name()]
 
+    def _combo_canonical_consumers(
+        self, node: BaseSchedulerNode
+    ) -> frozenset[BaseSchedulerNode]:
+        return frozenset(
+            self.name_to_fused_node[user.node.get_first_name()]
+            for output in node.get_outputs()
+            for user in output.users
+            if not user.is_weak and isinstance(user.node, BaseSchedulerNode)
+        )
+
     def fuse_two_nodes(
         self,
         node1: BaseSchedulerNode,
@@ -6547,6 +6557,58 @@ class Scheduler:
         else:
             node_to_idx = {n: i for i, n in enumerate(self.nodes)}
 
+        def cse_signature(node: BaseSchedulerNode) -> tuple[Any, ...] | None:
+            if node.read_writes.reads:
+                return None
+            output_signatures = []
+            for output in node.get_outputs():
+                signature = output.node.annotations.get(
+                    ir.DATA_INDEPENDENT_CSE_SIGNATURE
+                )
+                if not isinstance(signature, tuple):
+                    return None
+                output_signatures.append(
+                    (
+                        output.node.get_device(),
+                        output.node.get_dtype(),
+                        tuple(output.node.get_size()),
+                        signature,
+                    )
+                )
+            return tuple(output_signatures)
+
+        def _drop_cse_equivalent_nodes(
+            window: list[BaseSchedulerNode],
+        ) -> list[BaseSchedulerNode]:
+            node_cse_signatures = {node: cse_signature(node) for node in window}
+            signature_groups: dict[tuple[Any, ...], list[BaseSchedulerNode]] = (
+                defaultdict(list)
+            )
+            for node in window:
+                if (signature := node_cse_signatures.get(node)) is not None:
+                    signature_groups[signature].append(node)
+
+            protected_signatures = OrderedSet(
+                signature
+                for signature, nodes in signature_groups.items()
+                if len(nodes) > 1
+                and len(
+                    OrderedSet(self._combo_canonical_consumers(node) for node in nodes)
+                )
+                > 1
+            )
+            kept = []
+            for node in window:
+                signature = node_cse_signatures.get(node)
+                if signature in protected_signatures:
+                    fusion_log.debug(
+                        "ComboKernels: excluding per-consumer CSE copy %s",
+                        node.get_name(),
+                    )
+                    continue
+                kept.append(node)
+            return kept
+
         def _register_accept(
             combo_node: ForeachKernelSchedulerNode,
             accepted: list[BaseSchedulerNode],
@@ -6595,6 +6657,7 @@ class Scheduler:
             ):
                 if num_ck_nodes is not None and count > num_ck_nodes:
                     break
+                window = _drop_cse_equivalent_nodes(window)
                 if len(window) < 2 or not self.speedup_by_combo_kernel(window):
                     continue
                 if memory_check:
