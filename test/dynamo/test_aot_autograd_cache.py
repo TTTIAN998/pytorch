@@ -380,7 +380,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         """
         if device == GPU_TYPE and not HAS_GPU:
             raise unittest.SkipTest(f"requires {GPU_TYPE}")
-        if device == device_type and dtype == torch.bfloat16 and not SM80OrLater:
+        if device == "cuda" and dtype == torch.bfloat16 and not SM80OrLater:
             raise unittest.SkipTest("requires SM80 or later")
 
         def fn(x, y):
@@ -1795,8 +1795,8 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         """
         if device == GPU_TYPE and not HAS_GPU:
             raise unittest.SkipTest(f"requires {GPU_TYPE}")
-        if device == device_type and dtype == torch.bfloat16 and not SM80OrLater:
-            raise unittest.SkipTest("requires GPU SM80 or later")
+        if device == "cuda" and dtype == torch.bfloat16 and not SM80OrLater:
+            raise unittest.SkipTest("requires CUDA SM80 or later")
 
         def fn(x, y):
             return (x + x, y + y)
@@ -1902,8 +1902,8 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         """
         if device == GPU_TYPE and not HAS_GPU:
             raise unittest.SkipTest(f"requires {GPU_TYPE}")
-        if device == device_type and dtype == torch.bfloat16 and not SM80OrLater:
-            raise unittest.SkipTest("requires GPU SM80 or later")
+        if device == "cuda" and dtype == torch.bfloat16 and not SM80OrLater:
+            raise unittest.SkipTest("requires CUDA SM80 or later")
 
         def fn(x, y):
             return (x + x, y + y)
@@ -2315,7 +2315,7 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         """
         if device == GPU_TYPE and not HAS_GPU:
             raise unittest.SkipTest(f"requires {GPU_TYPE}")
-        if device == device_type and dtype == torch.bfloat16 and not SM80OrLater:
+        if device == "cuda" and dtype == torch.bfloat16 and not SM80OrLater:
             raise unittest.SkipTest("requires SM80 or later")
 
         def fn(x, y):
@@ -4062,18 +4062,7 @@ class AOTAutogradCachePicklerTests(torch._dynamo.test_case.TestCase):
         xnumel = 256
         inp = torch.randn(xnumel, device=GPU_TYPE)
         out = torch.empty_like(inp)
-        current_stream = torch.accelerator.current_stream()
-        stream = next(
-            filter(
-                lambda x: x,
-                (
-                    getattr(current_stream, "cuda_stream", None),
-                    getattr(current_stream, "sycl_queue", None),
-                ),
-            ),
-            None,
-        )
-        autotuner.run(inp, out, xnumel, stream=stream)
+        autotuner.run(inp, out, xnumel, stream=torch.cuda.current_stream().cuda_stream)
         self.assertEqual(out, inp + 1.0)
 
         # Inject a launcher key into benchmark_failure_reasons — this is how
