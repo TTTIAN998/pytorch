@@ -152,6 +152,14 @@ class TestONNXRuntime_cuda(onnx_test_common._TestONNXRuntime):
         self.run_test(Model(), (x, y))
 
 
-instantiate_device_type_tests(TestONNXRuntime_cuda, globals(), only_for=("cuda",))
+attrs, input_values = _parameterized_class_attrs_and_values(
+    MIN_ONNX_OPSET_VERSION, MAX_ONNX_OPSET_VERSION
+).values()
+for vals in input_values:
+    name = onnx_test_common.parameterize_class_name(
+        TestONNXRuntime_cuda, 0, dict(zip(attrs, vals))
+    )
+    instantiate_device_type_tests(globals()[name], globals(), only_for=("cuda",))
+
 if __name__ == "__main__":
     common_utils.run_tests()
